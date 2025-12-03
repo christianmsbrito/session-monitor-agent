@@ -1,0 +1,417 @@
+/**
+ * FileManager - Manages documentation output file structure
+ *
+ * Directory structure:
+ * .session-docs/
+ * ├── index.md
+ * └── sessions/
+ *     └── 2025-12-03/                    # Grouped by day
+ *         ├── abc123-debugging-auth/     # sessionId-subject slug
+ *         │   ├── session.md
+ *         │   ├── events/
+ *         │   └── summaries/
+ *         └── def456-refactor-api/
+ */
+
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import type { SessionMetadata } from '../types/index.js';
+
+export class FileManager {
+  private sessionDir: string;
+  private eventsDir: string;
+  private summariesDir: string;
+  private eventCounter: number = 0;
+  private initialized: boolean = false;
+  private sessionSubject: string | null = null;
+  private dateStr: string;
+  private shortSessionId: string;
+
+  constructor(
+    private outputDir: string,
+    private sessionId: string
+  ) {
+    // Extract date for grouping (YYYY-MM-DD)
+    this.dateStr = new Date().toISOString().slice(0, 10);
+
+    // Use shortened session ID (first 8 chars of UUID)
+    this.shortSessionId = sessionId.slice(0, 8);
+
+    // Initial path without subject - will be updated when subject is set
+    this.sessionDir = path.join(outputDir, 'sessions', this.dateStr, this.shortSessionId);
+    this.eventsDir = path.join(this.sessionDir, 'events');
+    this.summariesDir = path.join(this.sessionDir, 'summaries');
+  }
+
+  /**
+   * Set the session subject/title - updates directory name
+   * Should be called early, before writing many files
+   */
+  async setSessionSubject(subject: string): Promise<void> {
+    if (this.sessionSubject === subject) return;
+
+    const slug = this.slugify(subject);
+    if (!slug) return;
+
+    const oldSessionDir = this.sessionDir;
+    const newDirName = `${this.shortSessionId}-${slug}`;
+    const newSessionDir = path.join(this.outputDir, 'sessions', this.dateStr, newDirName);
+
+    // If already initialized with files, rename the directory
+    if (this.initialized && oldSessionDir !== newSessionDir) {
+      try {
+        await fs.rename(oldSessionDir, newSessionDir);
+      } catch {
+        // Directory might not exist yet or rename failed, that's ok
+      }
+    }
+
+    this.sessionSubject = subject;
+    this.sessionDir = newSessionDir;
+    this.eventsDir = path.join(this.sessionDir, 'events');
+    this.summariesDir = path.join(this.sessionDir, 'summaries');
+  }
+
+  /**
+   * Get the current session subject
+   */
+  getSessionSubject(): string | null {
+    return this.sessionSubject;
+  }
+
+  /**
+   * Convert a title to a URL-friendly slug
+   */
+  private slugify(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '') // Remove special chars
+      .replace(/\s+/g, '-')          // Spaces to hyphens
+      .replace(/-+/g, '-')           // Collapse multiple hyphens
+      .replace(/^-|-$/g, '')         // Trim hyphens
+      .slice(0, 50);                 // Limit length
+  }
+
+  /**
+   * Initialize directory structure
+   */
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+
+    await fs.mkdir(this.eventsDir, { recursive: true });
+    await fs.mkdir(this.summariesDir, { recursive: true });
+
+    // Ensure index file exists
+    const indexPath = path.join(this.outputDir, 'index.md');
+    try {
+      await fs.access(indexPath);
+    } catch {
+      await fs.writeFile(
+        indexPath,
+        '# Session Documentation Index\n\nAutomatically generated documentation from coding sessions.\n\n## Sessions\n\n'
+      );
+    }
+
+    this.initialized = true;
+  }
+
+  /**
+   * Get the next event filename
+   */
+  private getNextEventFilename(eventType: string): string {
+    this.eventCounter++;
+    const paddedNum = String(this.eventCounter).padStart(3, '0');
+    return `${paddedNum}-${eventType}.md`;
+  }
+
+  /**
+   * Write an event to the events directory
+   */
+  async writeEvent(eventType: string, content: string): Promise<string> {
+    await this.initialize();
+
+    const filename = this.getNextEventFilename(eventType);
+    const filepath = path.join(this.eventsDir, filename);
+
+    await fs.writeFile(filepath, content, 'utf-8');
+
+    return filepath;
+  }
+
+  /**
+   * Append content to the main session document
+   */
+  async appendToSession(content: string): Promise<void> {
+    await this.initialize();
+
+    const sessionPath = path.join(this.sessionDir, 'session.md');
+
+    try {
+      await fs.access(sessionPath);
+      await fs.appendFile(sessionPath, '\n' + content);
+    } catch {
+      // File doesn't exist, create with header
+      const title = this.sessionSubject || `Session ${this.shortSessionId}`;
+      const header = `# ${title}\n\n**Session ID**: ${this.sessionId}\n**Date**: ${this.dateStr}\n**Started**: ${new Date().toISOString()}\n\n## Events\n\n`;
+      await fs.writeFile(sessionPath, header + content, 'utf-8');
+    }
+  }
+
+  /**
+   * Update the session.md header with subject if it was set after creation
+   */
+  async updateSessionHeader(): Promise<void> {
+    if (!this.sessionSubject) return;
+
+    const sessionPath = path.join(this.sessionDir, 'session.md');
+
+    try {
+      const content = await fs.readFile(sessionPath, 'utf-8');
+
+      // Check if header still has default title
+      const defaultTitlePattern = new RegExp(`^# Session ${this.shortSessionId}\\n`);
+      if (defaultTitlePattern.test(content)) {
+        const updatedContent = content.replace(
+          defaultTitlePattern,
+          `# ${this.sessionSubject}\n`
+        );
+        await fs.writeFile(sessionPath, updatedContent, 'utf-8');
+      }
+    } catch {
+      // File doesn't exist yet, that's ok
+    }
+  }
+
+  /**
+   * Write a summary file
+   */
+  async writeSummary(
+    summaryType: 'hourly' | 'session',
+    content: string
+  ): Promise<string> {
+    await this.initialize();
+
+    let filename: string;
+    if (summaryType === 'hourly') {
+      const hourlyFiles = await this.listFiles(this.summariesDir, 'hourly-');
+      const nextNum = hourlyFiles.length + 1;
+      filename = `hourly-${nextNum}.md`;
+    } else {
+      filename = 'session-final.md';
+    }
+
+    const filepath = path.join(this.summariesDir, filename);
+    await fs.writeFile(filepath, content, 'utf-8');
+
+    return filepath;
+  }
+
+  /**
+   * Update the running session summary (called after each interaction)
+   * This overwrites the current summary with an updated version
+   */
+  async updateRunningSummary(content: string): Promise<string> {
+    await this.initialize();
+
+    const filepath = path.join(this.summariesDir, 'running-summary.md');
+    const header = `# Session Summary (Live)\n\n**Last Updated**: ${new Date().toISOString()}\n\n---\n\n`;
+    await fs.writeFile(filepath, header + content, 'utf-8');
+
+    return filepath;
+  }
+
+  /**
+   * Read the current running summary
+   */
+  async getRunningSummary(): Promise<string | null> {
+    try {
+      const filepath = path.join(this.summariesDir, 'running-summary.md');
+      return await fs.readFile(filepath, 'utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Mark an event file as invalidated
+   * Prepends a warning banner and renames the file
+   */
+  async markEventInvalidated(eventTitle: string, reason: string): Promise<boolean> {
+    await this.initialize();
+
+    try {
+      // Find the event file by searching for matching title
+      const files = await this.listFiles(this.eventsDir);
+
+      for (const file of files) {
+        if (file.endsWith('.md') && !file.startsWith('INVALIDATED-')) {
+          const filepath = path.join(this.eventsDir, file);
+          const content = await fs.readFile(filepath, 'utf-8');
+
+          // Check if this file contains the event we're looking for
+          if (content.includes(eventTitle)) {
+            // Prepend invalidation banner
+            const banner = `# ⚠️ INVALIDATED
+
+> **This documentation has been marked as INCORRECT**
+>
+> **Reason:** ${reason}
+>
+> **Invalidated at:** ${new Date().toISOString()}
+>
+> The information below was found to be wrong. See the correction event for accurate information.
+
+---
+
+`;
+            const newContent = banner + content;
+
+            // Rename file to indicate invalidation
+            const newFilename = `INVALIDATED-${file}`;
+            const newFilepath = path.join(this.eventsDir, newFilename);
+
+            // Write updated content to new file
+            await fs.writeFile(newFilepath, newContent, 'utf-8');
+
+            // Remove old file
+            await fs.unlink(filepath);
+
+            // Also update the session.md to mark this event
+            await this.markInSessionDocument(eventTitle, reason);
+
+            return true;
+          }
+        }
+      }
+
+      return false;
+    } catch (error) {
+      // File operations might fail, but we don't want to crash
+      return false;
+    }
+  }
+
+  /**
+   * Mark an event as invalidated in the main session document
+   */
+  private async markInSessionDocument(eventTitle: string, reason: string): Promise<void> {
+    const sessionPath = path.join(this.sessionDir, 'session.md');
+
+    try {
+      const content = await fs.readFile(sessionPath, 'utf-8');
+
+      // Find and mark the event entry
+      // Look for the event title and add a strikethrough + note
+      const updatedContent = content.replace(
+        new RegExp(`(### [^:]+: ${this.escapeRegex(eventTitle)})`, 'g'),
+        `$1 ~~[INVALIDATED]~~\n\n> ⚠️ **Invalidated:** ${reason}\n`
+      );
+
+      if (updatedContent !== content) {
+        await fs.writeFile(sessionPath, updatedContent, 'utf-8');
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  /**
+   * Escape special regex characters in a string
+   */
+  private escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * Update the global index with this session
+   */
+  async updateIndex(metadata: SessionMetadata): Promise<void> {
+    const indexPath = path.join(this.outputDir, 'index.md');
+
+    // Build the display title
+    const displayTitle = this.sessionSubject || this.shortSessionId;
+
+    // Get relative path from sessions dir
+    const sessionDirName = path.basename(this.sessionDir);
+    const relativePath = `./sessions/${this.dateStr}/${sessionDirName}/session.md`;
+
+    const sessionLink = `- [${displayTitle}](${relativePath}) - ${this.shortSessionId} (${metadata.eventCount} events)\n`;
+
+    let content: string;
+    try {
+      content = await fs.readFile(indexPath, 'utf-8');
+    } catch {
+      // Index doesn't exist, create it
+      content = '# Session Documentation Index\n\nAutomatically generated documentation from coding sessions.\n\n';
+    }
+
+    // Check if we have a section for this date
+    const dateSectionHeader = `## ${this.dateStr}\n`;
+    if (!content.includes(dateSectionHeader)) {
+      // Add new date section (insert before other sections or at end)
+      const insertPosition = content.lastIndexOf('\n## ');
+      if (insertPosition > 0) {
+        // Insert before existing date sections (to keep newest first)
+        content = content.slice(0, insertPosition) + '\n' + dateSectionHeader + '\n' + content.slice(insertPosition);
+      } else {
+        // No existing sections, append
+        content += '\n' + dateSectionHeader + '\n';
+      }
+    }
+
+    // Check if session already in index (by session ID)
+    const sessionIdPattern = new RegExp(`- \\[[^\\]]+\\]\\([^)]*${this.shortSessionId}[^)]*\\).*\\n`);
+    if (sessionIdPattern.test(content)) {
+      // Update existing entry
+      content = content.replace(sessionIdPattern, sessionLink);
+    } else {
+      // Add entry under the date section
+      const sectionIndex = content.indexOf(dateSectionHeader);
+      const insertAt = sectionIndex + dateSectionHeader.length + 1;
+      content = content.slice(0, insertAt) + sessionLink + content.slice(insertAt);
+    }
+
+    await fs.writeFile(indexPath, content, 'utf-8');
+  }
+
+  /**
+   * Read an existing file
+   */
+  async readFile(relativePath: string): Promise<string | null> {
+    try {
+      const filepath = path.join(this.sessionDir, relativePath);
+      return await fs.readFile(filepath, 'utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * List files in a directory matching a prefix
+   */
+  private async listFiles(dir: string, prefix?: string): Promise<string[]> {
+    try {
+      const files = await fs.readdir(dir);
+      if (prefix) {
+        return files.filter((f) => f.startsWith(prefix));
+      }
+      return files;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get session directory path
+   */
+  getSessionDir(): string {
+    return this.sessionDir;
+  }
+
+  /**
+   * Get current event count
+   */
+  getEventCount(): number {
+    return this.eventCounter;
+  }
+}

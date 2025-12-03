@@ -1,0 +1,40 @@
+{
+  "name": "session-monitor-agent",
+  "version": "0.1.0",
+  "description": "Multi-agent session documentation system for Claude Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "session-monitor": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest",
+    "test:run": "vitest run"
+  },
+  "keywords": [
+    "claude",
+    "agent",
+    "documentation",
+    "session-monitor"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "commander": "^12.1.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "eslint": "^9.16.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
