@@ -64,11 +64,70 @@ Claude Code Session
 
 ### CLI Commands
 
-The tool has four main commands:
+**Core Commands:**
 - `session-monitor install` - Installs hooks into `~/.claude/settings.json`
 - `session-monitor uninstall` - Removes hooks
 - `session-monitor status` - Checks if hooks are installed
 - `session-monitor start` - Starts the monitor daemon (requires `ANTHROPIC_API_KEY`)
+
+**Sentinel Commands (macOS):**
+- `session-monitor sentinel` - Runs the sentinel daemon that alerts when monitor isn't running
+- `session-monitor install-startup` - Installs macOS LaunchAgent for auto-start on login
+- `session-monitor uninstall-startup` - Removes the LaunchAgent
+
+### Sentinel Feature
+
+The sentinel is a lightweight daemon that ensures you never miss documenting a Claude Code session. It runs at system startup and monitors for session starts.
+
+**Architecture:**
+```
+User Login
+    ↓
+LaunchAgent starts sentinel daemon
+    ↓
+Sentinel listens on /tmp/session-monitor-sentinel.sock
+    ↓
+Claude Code Session Starts
+    ↓
+Hook script sends SessionStart to BOTH:
+  - Main monitor socket (/tmp/session-monitor.sock)
+  - Sentinel socket (/tmp/session-monitor-sentinel.sock)
+    ↓
+Sentinel checks if main monitor is running
+    ↓
+If NOT running → Shows dialog with configuration options
+```
+
+**Sentinel Options:**
+- `--auto-start` / `-a`: Automatically start the monitor instead of showing a dialog
+- `--verbose` / `-v`: Enable verbose logging
+
+**Configuration Dialog (when monitor not running):**
+1. Main prompt with options: "Ignore", "Configure...", "Start (Default)"
+2. If "Configure..." selected:
+   - API key input (if `ANTHROPIC_API_KEY` not in environment, with hidden input)
+   - Output directory (text field with "Browse..." option, default: `.session-docs`)
+   - Verbose mode toggle (Yes/No buttons, default: No)
+
+**Setup:**
+```bash
+# Install hooks first
+session-monitor install
+
+# Option 1: Notification mode (shows dialog when monitor not running)
+session-monitor install-startup
+
+# Option 2: Auto-start mode (automatically starts monitor)
+session-monitor install-startup --auto-start
+
+# To uninstall
+session-monitor uninstall-startup
+```
+
+**Key Files:**
+- `src/sentinel/sentinel.ts` - Main sentinel daemon
+- `src/sentinel/launchagent.ts` - macOS LaunchAgent installer
+- LaunchAgent plist: `~/Library/LaunchAgents/com.session-monitor.sentinel.plist`
 
 ### Output Structure
 

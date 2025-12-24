@@ -9,6 +9,14 @@
 import { parseArgs, buildWatcherConfig, printUsage } from './cli/index.js';
 import { SessionWatcher } from './watcher/index.js';
 import { installHooks, uninstallHooks, checkHooksInstalled } from './hooks/index.js';
+import {
+  Sentinel,
+  installStartup,
+  uninstallStartup,
+  getPlistPath,
+  type SentinelConfig,
+  type InstallStartupOptions,
+} from './sentinel/index.js';
 
 async function main(): Promise<void> {
   const parsed = parseArgs(process.argv);
@@ -33,6 +41,18 @@ async function main(): Promise<void> {
 
     case 'start':
       await handleStart(parsed.options);
+      break;
+
+    case 'sentinel':
+      await handleSentinel(parsed.options);
+      break;
+
+    case 'install-startup':
+      await handleInstallStartup(parsed.options);
+      break;
+
+    case 'uninstall-startup':
+      await handleUninstallStartup();
       break;
   }
 }
@@ -154,6 +174,87 @@ async function handleStart(options: Parameters<typeof buildWatcherConfig>[0]): P
     await watcher.start();
   } catch (error) {
     console.error('Error:', error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+async function handleSentinel(options: SentinelConfig): Promise<void> {
+  console.log('Starting sentinel daemon...\n');
+
+  if (options.autoStart) {
+    console.log('Mode: Auto-start (will automatically start monitor when needed)');
+  } else {
+    console.log('Mode: Notification (will show alert when monitor not running)');
+  }
+
+  if (options.verbose) {
+    console.log('Verbose logging enabled\n');
+  }
+
+  const sentinel = new Sentinel(options);
+
+  // Handle shutdown signals
+  const shutdown = async () => {
+    console.log('\nShutting down sentinel...');
+    await sentinel.stop();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  try {
+    await sentinel.start();
+    console.log('Sentinel is running. Press Ctrl+C to stop.\n');
+  } catch (error) {
+    console.error('Error:', error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+async function handleInstallStartup(options: InstallStartupOptions): Promise<void> {
+  console.log('Installing LaunchAgent for sentinel...\n');
+
+  const result = await installStartup(options);
+
+  if (result.success) {
+    console.log(`✓ ${result.message}`);
+    console.log(`  Plist: ${result.plistPath}`);
+
+    if (result.loaded) {
+      console.log('  Status: Loaded and running');
+    } else {
+      console.log('  Status: Installed (will start on next login)');
+    }
+
+    console.log('\nThe sentinel will now run automatically when you log in.');
+
+    if (options.autoStart) {
+      console.log('Mode: Auto-start (monitor will start automatically when needed)');
+    } else {
+      console.log('Mode: Notification (you will be prompted to start the monitor)');
+    }
+
+    console.log('\nTo uninstall: session-monitor uninstall-startup');
+  } else {
+    console.error(`✗ ${result.message}`);
+    process.exit(1);
+  }
+}
+
+async function handleUninstallStartup(): Promise<void> {
+  console.log('Uninstalling LaunchAgent for sentinel...\n');
+
+  const result = await uninstallStartup();
+
+  if (result.success) {
+    console.log(`✓ ${result.message}`);
+
+    if (result.unloaded) {
+      console.log('  Status: Unloaded and removed');
+    }
+  } else {
+    console.error(`✗ ${result.message}`);
     process.exit(1);
   }
 }

@@ -48,12 +48,39 @@ export interface ParsedHelpArgs {
   command: 'help';
 }
 
+export interface SentinelOptions {
+  autoStart: boolean;
+  verbose: boolean;
+}
+
+export interface ParsedSentinelArgs {
+  command: 'sentinel';
+  options: SentinelOptions;
+}
+
+export interface InstallStartupOptions {
+  autoStart: boolean;
+  verbose: boolean;
+}
+
+export interface ParsedInstallStartupArgs {
+  command: 'install-startup';
+  options: InstallStartupOptions;
+}
+
+export interface ParsedUninstallStartupArgs {
+  command: 'uninstall-startup';
+}
+
 export type ParsedArgs =
   | ParsedStartArgs
   | ParsedInstallArgs
   | ParsedUninstallArgs
   | ParsedStatusArgs
-  | ParsedHelpArgs;
+  | ParsedHelpArgs
+  | ParsedSentinelArgs
+  | ParsedInstallStartupArgs
+  | ParsedUninstallStartupArgs;
 
 // Default socket path
 const DEFAULT_SOCKET_PATH = path.join(os.tmpdir(), 'session-monitor.sock');
@@ -165,6 +192,48 @@ export function parseArgs(argv: string[]): ParsedArgs {
       });
     });
 
+  // Sentinel command - lightweight daemon for session start alerts
+  program
+    .command('sentinel')
+    .description('Run the sentinel daemon (alerts when monitor is not running)')
+    .option('-a, --auto-start', 'Auto-start the monitor instead of showing notification', false)
+    .option('-v, --verbose', 'Enable verbose logging', false)
+    .action((opts) => {
+      program.setOptionValue('_parsed', {
+        command: 'sentinel',
+        options: {
+          autoStart: opts.autoStart,
+          verbose: opts.verbose,
+        },
+      });
+    });
+
+  // Install startup (LaunchAgent) command
+  program
+    .command('install-startup')
+    .description('Install LaunchAgent to auto-start sentinel on login (macOS)')
+    .option('-a, --auto-start', 'Configure sentinel to auto-start the monitor', false)
+    .option('-v, --verbose', 'Enable verbose logging in sentinel', false)
+    .action((opts) => {
+      program.setOptionValue('_parsed', {
+        command: 'install-startup',
+        options: {
+          autoStart: opts.autoStart,
+          verbose: opts.verbose,
+        },
+      });
+    });
+
+  // Uninstall startup (LaunchAgent) command
+  program
+    .command('uninstall-startup')
+    .description('Remove LaunchAgent for sentinel (macOS)')
+    .action(() => {
+      program.setOptionValue('_parsed', {
+        command: 'uninstall-startup',
+      });
+    });
+
   program.parse(argv);
 
   const parsed = program.getOptionValue('_parsed');
@@ -186,9 +255,14 @@ export function buildWatcherConfig(options: WatchOptions): WatcherConfig {
     process.exit(1);
   }
 
+  // Resolve output directory to absolute path
+  const outputDir = path.isAbsolute(options.output)
+    ? options.output
+    : path.resolve(process.cwd(), options.output);
+
   return {
     socketPath: options.socketPath,
-    outputDir: options.output,
+    outputDir,
     maxQueueSize: options.maxQueue,
     batchSize: options.batchSize,
     flushIntervalMs: options.flushInterval,
@@ -208,10 +282,13 @@ USAGE:
   session-monitor <command> [options]
 
 COMMANDS:
-  install     Install Claude Code hooks for session monitoring
-  uninstall   Remove session-monitor hooks from Claude Code
-  status      Check if hooks are installed
-  start       Start the session monitor daemon
+  install           Install Claude Code hooks for session monitoring
+  uninstall         Remove session-monitor hooks from Claude Code
+  status            Check if hooks are installed
+  start             Start the session monitor daemon
+  sentinel          Run the sentinel daemon (alerts when monitor not running)
+  install-startup   Install LaunchAgent to auto-start sentinel on login (macOS)
+  uninstall-startup Remove LaunchAgent for sentinel (macOS)
 
 QUICK START:
   1. Install the hooks:
@@ -221,6 +298,16 @@ QUICK START:
      session-monitor start
 
   3. Use Claude Code normally - sessions will be documented automatically
+
+AUTOMATIC STARTUP (macOS):
+  # Install sentinel to run at login (shows alert if monitor not running)
+  session-monitor install-startup
+
+  # Or with auto-start (automatically starts monitor when needed)
+  session-monitor install-startup --auto-start
+
+  # Remove the startup agent
+  session-monitor uninstall-startup
 
 OPTIONS (for 'start' command):
   -o, --output <dir>       Output directory for docs (default: .session-docs)
@@ -235,6 +322,14 @@ OPTIONS (for 'start' command):
 OPTIONS (for 'install' command):
   -f, --force              Overwrite existing hooks
   -v, --verbose            Enable verbose logging
+
+OPTIONS (for 'sentinel' command):
+  -a, --auto-start         Auto-start monitor instead of showing notification
+  -v, --verbose            Enable verbose logging
+
+OPTIONS (for 'install-startup' command):
+  -a, --auto-start         Configure sentinel to auto-start the monitor
+  -v, --verbose            Enable verbose logging in sentinel
 
 EXAMPLES:
   # Install hooks
@@ -251,5 +346,14 @@ EXAMPLES:
 
   # Uninstall hooks
   session-monitor uninstall
+
+  # Run sentinel manually
+  session-monitor sentinel -v
+
+  # Install sentinel to run at login
+  session-monitor install-startup
+
+  # Install with auto-start mode
+  session-monitor install-startup --auto-start
 `);
 }

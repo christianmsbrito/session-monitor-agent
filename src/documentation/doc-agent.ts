@@ -149,7 +149,7 @@ const EventResponseSchema = z.object({
       evidence: stringOrArrayToString,      // Direct quotes, code, output
       reasoning: stringOrArrayToString,     // Why this decision/conclusion
       // Confirmation-specific fields
-      confirms: z.string().optional(),      // What earlier analysis this confirms
+      confirms: stringOrArrayToString,      // What earlier analysis this confirms
       // Correction-specific fields
       invalidates: z.string().optional(),   // What earlier doc is being invalidated
       reason: z.string().optional(),        // Why the earlier doc was wrong
@@ -475,9 +475,16 @@ ${preparedContext}`,
         jsonStr = this.extractJsonObject(responseText);
       } else {
         // Look for JSON embedded in text (e.g., after explanation)
-        const jsonMatch = responseText.match(/\{[\s\S]*"events"[\s\S]*\}/);
-        if (jsonMatch) {
-          jsonStr = jsonMatch[0];
+        // Find the position of a { that precedes "events" (the start of our JSON object)
+        const eventsIndex = responseText.indexOf('"events"');
+        if (eventsIndex !== -1) {
+          // Find the opening brace before "events"
+          const beforeEvents = responseText.slice(0, eventsIndex);
+          const lastBraceIndex = beforeEvents.lastIndexOf('{');
+          if (lastBraceIndex !== -1) {
+            // Use proper brace-matching extraction from this position
+            jsonStr = this.extractJsonObject(responseText.slice(lastBraceIndex));
+          }
         }
       }
 

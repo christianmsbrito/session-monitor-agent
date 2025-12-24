@@ -1,92 +1,109 @@
 # Session Monitor Agent
 
-A background documentation agent that watches Claude Code sessions via hooks and automatically documents significant events like bug fixes, decisions, and discoveries.
+Automatically document your Claude Code sessions. Never lose track of bug fixes, decisions, or discoveries again.
 
-## How It Works
+## What It Does
 
-Session Monitor runs as a background daemon that integrates with Claude Code through its hooks system. When you use Claude Code normally, the monitor:
+Session Monitor watches your Claude Code sessions in the background and automatically creates structured documentation of significant events - bug fixes, architectural decisions, user requests, and more.
 
-1. **Captures session events** via hooks (tool usage, conversation stops, session lifecycle)
-2. **Reads the conversation transcript** to understand context
-3. **Analyzes with Claude Haiku** to identify significant moments worth documenting
-4. **Writes structured markdown** organizing findings by session and event type
+## Prerequisites
 
-The result is automatic, comprehensive documentation of your coding sessions without any manual effort.
+- **Node.js** >= 20.0.0
+- **Claude Code** with hooks support
+- **Anthropic API Key** ([Get one here](https://console.anthropic.com/))
 
-## Installation
+## Setup (3 Steps)
+
+### Step 1: Install Globally
 
 ```bash
-# Clone and install
+npm install -g session-monitor-agent
+```
+
+Or install from source:
+```bash
 git clone https://github.com/your-username/session-monitor-agent.git
 cd session-monitor-agent
-npm install
-npm run build
-
-# Install hooks into Claude Code
-npm start -- install
+npm install && npm run build
+npm link  # Makes 'session-monitor' available globally
 ```
 
-## Quick Start
+### Step 2: Install Claude Code Hooks
 
 ```bash
-# 1. Set your Anthropic API key
+session-monitor install
+```
+
+This adds monitoring hooks to `~/.claude/settings.json`.
+
+### Step 3: Set Up Automatic Startup (macOS)
+
+Choose one of these options:
+
+**Option A: Interactive Mode** (Recommended for most users)
+```bash
+session-monitor install-startup
+```
+When you start Claude Code, you'll get a dialog to start the monitor with options to configure the API key, output directory, and verbose mode.
+
+**Option B: Fully Automatic Mode**
+```bash
+# Set your API key in your shell profile (~/.zshrc or ~/.bashrc)
+echo 'export ANTHROPIC_API_KEY="your-key-here"' >> ~/.zshrc
+source ~/.zshrc
+
+# Install with auto-start
+session-monitor install-startup --auto-start
+```
+The monitor starts automatically whenever you use Claude Code - completely hands-free.
+
+### Done!
+
+Start using Claude Code normally. Documentation appears in `.session-docs/` in your working directory.
+
+---
+
+## Manual Usage
+
+If you prefer not to use automatic startup, you can run the monitor manually:
+
+```bash
+# Terminal 1: Start the monitor
 export ANTHROPIC_API_KEY="your-key-here"
+session-monitor start
 
-# 2. Start the monitor daemon (in a dedicated terminal)
-npm start -- start
-
-# 3. Use Claude Code normally in another terminal
-# Documentation will appear in .session-docs/
+# Terminal 2: Use Claude Code normally
+claude
 ```
 
-## Commands
+---
 
-### `session-monitor install`
+## Configuration Options
 
-Installs monitoring hooks into Claude Code's settings (`~/.claude/settings.json`).
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_API_KEY` | Your Anthropic API key (required) |
+| `SESSION_MONITOR_SOCKET` | Custom socket path (optional) |
+| `SESSION_MONITOR_DEBUG` | Set to `1` for debug logging |
+
+### Start Command Options
 
 ```bash
-npm start -- install           # Install hooks
-npm start -- install --force   # Overwrite existing hooks
-npm start -- install --debug   # Enable debug logging in hooks
+session-monitor start [options]
 ```
 
-### `session-monitor uninstall`
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-o, --output <dir>` | Output directory | `.session-docs` |
+| `-k, --api-key <key>` | Anthropic API key | `$ANTHROPIC_API_KEY` |
+| `-m, --model <model>` | Model for analysis | `claude-3-haiku-20240307` |
+| `-v, --verbose` | Verbose logging | `false` |
+| `--max-queue <n>` | Max queue size | `1000` |
+| `--batch-size <n>` | Messages per batch | `10` |
 
-Removes session-monitor hooks from Claude Code.
-
-```bash
-npm start -- uninstall
-```
-
-### `session-monitor status`
-
-Checks if hooks are properly installed.
-
-```bash
-npm start -- status
-```
-
-### `session-monitor start`
-
-Starts the monitoring daemon. This should run in a dedicated terminal while you use Claude Code.
-
-```bash
-npm start -- start                        # Basic start
-npm start -- start --verbose              # Verbose logging
-npm start -- start --output ./my-docs     # Custom output directory
-npm start -- start --model claude-3-5-haiku-latest  # Different model
-```
-
-**Options:**
-- `-o, --output <dir>` - Output directory (default: `.session-docs`)
-- `-k, --api-key <key>` - Anthropic API key (or use `ANTHROPIC_API_KEY` env var)
-- `-m, --model <model>` - Model for documentation agent (default: `claude-3-haiku-20240307`)
-- `-v, --verbose` - Enable verbose logging
-- `--socket <path>` - Unix socket path (default: `/tmp/session-monitor.sock`)
-- `--max-queue <n>` - Maximum message queue size (default: 1000)
-- `--batch-size <n>` - Messages per batch (default: 10)
-- `--flush-interval <ms>` - Flush interval in milliseconds (default: 5000)
+---
 
 ## Output Structure
 
@@ -96,117 +113,159 @@ Documentation is organized by date and session:
 .session-docs/
 ├── index.md                              # Links to all sessions
 └── sessions/
-    └── 2025-12-03/
-        └── abc123-debugging-auth/        # sessionId + subject slug
-            ├── session.md                # Session overview with event links
+    └── 2025-12-24/
+        └── abc123-debugging-auth/
+            ├── session.md                # Session overview
             ├── events/
-            │   ├── 001-user_request.md   # Individual documented events
+            │   ├── 001-user_request.md
             │   ├── 002-agent_analysis.md
             │   └── 003-solution_verified.md
             └── summaries/
-                └── running-summary.md    # Live-updated session summary
+                └── running-summary.md
 ```
+
+---
 
 ## What Gets Documented
 
-The agent distinguishes between **confirmed** and **unconfirmed** information:
-
 ### Confirmed Events (User Verified)
-- **user_request** - What the user asked for
-- **user_confirmed** - User explicitly confirmed agent's analysis
-- **user_provided** - Information the user directly provided
-- **solution_verified** - Fix confirmed working by user
-- **requirement_clarified** - Requirements confirmed by user
+- `user_request` - What you asked for
+- `user_confirmed` - Explicit confirmations
+- `solution_verified` - Fixes confirmed working
+- `requirement_clarified` - Clarified requirements
 
 ### Unconfirmed Events (Agent Analysis)
-- **agent_analysis** - Agent's understanding of code/system
-- **agent_suggestion** - Agent's recommendations
-- **bug_identified** - Root cause identified (until user confirms)
-- **decision_made** - Decisions made (until implemented/tested)
+- `agent_analysis` - Code/system understanding
+- `agent_suggestion` - Recommendations
+- `bug_identified` - Root causes found
+- `decision_made` - Architectural decisions
 
 ### Special Events
-- **correction** - Previous finding was wrong, invalidates earlier documentation
+- `correction` - Invalidates previous documentation
 
-## Example Documentation Output
+---
 
-**Session: Debugging Authentication Flow**
+## All Commands
 
-```markdown
-# Debugging Authentication Flow
+| Command | Description |
+|---------|-------------|
+| `session-monitor install` | Install Claude Code hooks |
+| `session-monitor uninstall` | Remove hooks |
+| `session-monitor status` | Check if hooks are installed |
+| `session-monitor start` | Start the monitor daemon |
+| `session-monitor sentinel` | Run sentinel daemon (macOS) |
+| `session-monitor install-startup` | Install auto-start (macOS) |
+| `session-monitor uninstall-startup` | Remove auto-start (macOS) |
 
-**Session ID**: abc12345-6789-...
-**Date**: 2025-12-03
+---
 
-## Events
+## Sentinel Feature (macOS)
 
-### user_request: Fix login timeout issue
-Users are experiencing timeouts when logging in...
-[→ Full details](./events/001-user_request.md)
+The sentinel ensures you never miss documenting a session. It runs at login and monitors for Claude Code session starts.
 
-### agent_analysis: Token refresh mechanism
-The authentication system uses a token refresh pattern...
-[→ Full details](./events/002-agent_analysis.md)
+### How It Works
 
-### solution_verified: Increased timeout resolved issue
-After increasing the timeout from 5s to 30s...
-[→ Full details](./events/003-solution_verified.md)
 ```
+Login → Sentinel starts → You open Claude Code → Sentinel checks if monitor running
+                                                          ↓
+                                              If not → Shows dialog / Auto-starts
+```
+
+### Configuration Dialog
+
+When using interactive mode (`install-startup` without `--auto-start`), you'll see:
+
+1. **Main Dialog**: "Start (Default)", "Configure...", or "Ignore"
+2. **If Configure...**:
+   - **API Key** (if not in environment) - hidden input field
+   - **Output Directory** - with Browse button
+   - **Verbose Mode** - Yes/No
+
+### Sentinel Options
+
+```bash
+session-monitor sentinel [options]
+session-monitor install-startup [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-a, --auto-start` | Auto-start monitor instead of showing dialog |
+| `-v, --verbose` | Enable verbose logging |
+
+---
+
+## Troubleshooting
+
+### Hooks not working
+```bash
+session-monitor status          # Check status
+session-monitor install --force # Reinstall
+```
+
+### Monitor not receiving events
+```bash
+ls -la /tmp/session-monitor.sock  # Check socket exists
+session-monitor start --verbose   # Run with verbose
+```
+
+### Sentinel issues (macOS)
+```bash
+# Check if running
+launchctl list | grep session-monitor
+
+# View logs
+cat /tmp/session-monitor-sentinel.log
+
+# Reinstall
+session-monitor uninstall-startup
+session-monitor install-startup
+```
+
+### Debug mode
+```bash
+session-monitor install --debug
+# Logs: /tmp/session-monitor-hooks.log
+```
+
+---
+
+## Uninstall
+
+```bash
+# Remove auto-start (macOS)
+session-monitor uninstall-startup
+
+# Remove hooks
+session-monitor uninstall
+
+# Remove global package
+npm uninstall -g session-monitor-agent
+```
+
+---
 
 ## Development
 
 ```bash
-# Build
-npm run build
-
-# Watch mode
-npm run dev
-
-# Lint
-npm run lint
-
-# Test
-npm test
-npm run test:run  # Run once without watch
+npm run build      # Build
+npm run dev        # Watch mode
+npm run lint       # Lint
+npm test           # Test
 ```
 
 ## Architecture
 
 ```
-Claude Code → Hooks → Unix Socket → Session Watcher → Doc Agent → Markdown Files
+Claude Code → Hooks → Unix Socket → Session Watcher → Doc Agent → Markdown
 ```
 
-Key components:
-- **Hook Script**: Lightweight script triggered by Claude Code hooks, sends events via Unix socket
-- **Socket Server**: Receives hook events and triggers transcript processing
-- **Session Watcher**: Orchestrates the pipeline, manages one DocumentationAgent per Claude Code session
-- **Documentation Agent**: Uses Claude Haiku to analyze conversations and extract significant events
-- **Hierarchical Context Manager**: Three-tier context (recent/hourly/session) for handling long sessions
-- **File Manager**: Writes and organizes markdown documentation
+- **Hook Script**: Triggered by Claude Code, sends events via socket
+- **Session Watcher**: Orchestrates the documentation pipeline
+- **Documentation Agent**: Uses Claude Haiku to analyze and document
+- **File Manager**: Writes organized markdown documentation
 
-## Requirements
-
-- Node.js >= 20.0.0
-- Anthropic API key with access to Claude Haiku
-- Claude Code with hooks support
-
-## Troubleshooting
-
-### Hooks not triggering
-1. Check hook status: `npm start -- status`
-2. Reinstall with force: `npm start -- install --force`
-3. Verify Claude Code settings: `cat ~/.claude/settings.json`
-
-### Monitor not receiving events
-1. Ensure monitor is running: Check for "Waiting for Claude Code hooks..." message
-2. Check socket exists: `ls -la /tmp/session-monitor.sock`
-3. Enable verbose mode: `npm start -- start --verbose`
-
-### Debug mode
-Install hooks with debug logging to troubleshoot hook execution:
-```bash
-npm start -- install --debug
-# Logs written to: /tmp/session-monitor-hooks.log
-```
+---
 
 ## License
 

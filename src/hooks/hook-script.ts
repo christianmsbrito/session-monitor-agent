@@ -18,6 +18,8 @@ import * as os from 'os';
 const SOCKET_PATH = process.env.SESSION_MONITOR_SOCKET ||
   path.join(os.tmpdir(), 'session-monitor.sock');
 
+const SENTINEL_SOCKET_PATH = path.join(os.tmpdir(), 'session-monitor-sentinel.sock');
+
 const DEBUG = process.env.SESSION_MONITOR_DEBUG === '1';
 const LOG_FILE = path.join(os.tmpdir(), 'session-monitor-hooks.log');
 
@@ -75,24 +77,36 @@ async function main(): Promise<void> {
     data: hookData,
   };
 
-  // Send to socket server
+  // Send to main monitor socket
   try {
-    debugLog(`Sending event to socket...`);
-    await sendToSocket(event);
-    debugLog(`Event sent successfully`);
+    debugLog(`Sending event to monitor socket...`);
+    await sendToSocket(event, SOCKET_PATH);
+    debugLog(`Event sent to monitor successfully`);
   } catch (err) {
-    debugLog(`Failed to send to socket: ${err}`);
+    debugLog(`Failed to send to monitor socket: ${err}`);
     // Socket not available, monitor might not be running
     // Exit silently to not block Claude Code
+  }
+
+  // On SessionStart, also send to sentinel socket (fire-and-forget)
+  if (hookType === 'SessionStart') {
+    try {
+      debugLog(`Sending SessionStart to sentinel socket...`);
+      await sendToSocket(event, SENTINEL_SOCKET_PATH);
+      debugLog(`Event sent to sentinel successfully`);
+    } catch (err) {
+      debugLog(`Failed to send to sentinel socket: ${err}`);
+      // Sentinel might not be running, that's fine
+    }
   }
 
   // Exit successfully to not block Claude Code
   process.exit(0);
 }
 
-async function sendToSocket(event: unknown): Promise<void> {
+async function sendToSocket(event: unknown, socketPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const client = net.createConnection(SOCKET_PATH, () => {
+    const client = net.createConnection(socketPath, () => {
       client.write(JSON.stringify(event) + '\n');
       client.end();
     });

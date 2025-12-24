@@ -208,7 +208,20 @@ export class HierarchicalContextManager {
         const results = getToolResults(msg);
         for (const result of results) {
           // Extract file paths from tool results
-          const fileMatches = result.content.match(
+          // Handle both string content and array content (API format varies)
+          // Type says string but runtime can be array - cast to handle both
+          const rawContent = result.content as unknown;
+          const contentStr = typeof rawContent === 'string'
+            ? rawContent
+            : Array.isArray(rawContent)
+              ? rawContent.map((c: unknown) => {
+                  if (typeof c === 'string') return c;
+                  if (c && typeof c === 'object' && 'text' in c) return (c as { text: string }).text;
+                  return '';
+                }).join(' ')
+              : String(rawContent);
+
+          const fileMatches = contentStr.match(
             /(?:^|\s)([\w./\\-]+\.[a-z]+)/gi
           );
           if (fileMatches) {
