@@ -15,6 +15,7 @@ import {
   getTextContent,
   getToolResults,
   hasUserFacingContent,
+  hasActualUserText,
 } from '../types/index.js';
 
 /**
@@ -160,15 +161,18 @@ export class SignificanceDetector {
 
     // Check user messages
     if (isUserMessage(message)) {
-      // User text input (actual prompts) is always significant
-      const text = getTextContent(message);
-      if (verbose) {
-        console.error(`[detector] User message text: "${text.slice(0, 50)}..." (length: ${text.length})`);
-      }
-      if (text.trim().length > 0) {
+      // Only mark as significant if this is actual human input (not tool results)
+      if (hasActualUserText(message)) {
+        const text = getTextContent(message);
+        if (verbose) {
+          console.error(`[detector] User message (actual human input): "${text.slice(0, 50)}..." (length: ${text.length})`);
+        }
         return true;  // User actually wrote something
       }
-      // Also check tool results
+      // For tool results, check if they contain significant outcomes
+      if (verbose) {
+        console.error('[detector] User message (tool result, not human input)');
+      }
       return this.checkToolResultSignificance(message);
     }
 
@@ -184,21 +188,20 @@ export class SignificanceDetector {
     }
 
     if (isUserMessage(message)) {
-      const text = getTextContent(message);
-      const hasUserText = text.trim().length > 0;
-      const hasSignificantTools = this.checkToolResultSignificance(message);
-
-      // Analyze user text for patterns
-      if (hasUserText) {
+      // Only treat as significant user input if it contains actual human text
+      if (hasActualUserText(message)) {
+        const text = getTextContent(message);
         const result = this.checkUserMessageSignificance(text);
         return {
           isSignificant: true,
           categories: result.categories,
-          confidence: Math.max(0.8, result.confidence),  // User messages get high confidence
+          confidence: Math.max(0.8, result.confidence),  // Actual user messages get high confidence
           matchedPatterns: result.matchedPatterns,
         };
       }
 
+      // This is a tool result (not actual user input) - check for significant outcomes
+      const hasSignificantTools = this.checkToolResultSignificance(message);
       return {
         isSignificant: hasSignificantTools,
         categories: [],

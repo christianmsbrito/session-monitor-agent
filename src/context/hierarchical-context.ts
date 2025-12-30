@@ -15,6 +15,7 @@ import {
   getToolUses,
   getToolResults,
   hasUserFacingContent,
+  hasActualUserText,
 } from '../types/index.js';
 
 export interface ContextConfig {
@@ -308,13 +309,13 @@ export class HierarchicalContextManager {
           return `**Assistant**: ${text}`;
         }
         if (isUserMessage(m)) {
-          // Check for user text input FIRST - this is what the user actually said
-          const text = getTextContent(m);
-          if (text.trim()) {
+          // Check for actual user text input (not tool results)
+          if (hasActualUserText(m)) {
+            const text = getTextContent(m);
             // User prompts are highest priority - preserve fully
             return `**User**: ${text}`;
           }
-          // Tool results - preserve full content
+          // Tool results (not actual user input) - preserve full content
           const results = getToolResults(m);
           if (results.length > 0) {
             const formattedResults = results

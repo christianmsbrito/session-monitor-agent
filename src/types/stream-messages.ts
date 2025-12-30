@@ -83,6 +83,25 @@ export function isUserMessage(msg: StreamMessage): msg is UserMessage {
 }
 
 /**
+ * Check if a user message contains actual human text input
+ * (as opposed to tool_result content which is automated)
+ *
+ * In Claude API, tool results are sent as "user" role messages,
+ * but they're not actual user input - they're automated responses.
+ *
+ * Note: By the time messages reach here, the TranscriptReader has already
+ * normalized string content to ContentBlock[] arrays.
+ */
+export function hasActualUserText(msg: UserMessage): boolean {
+  const content = msg.message.content;
+
+  // Check for text blocks (actual user input), not just tool_result blocks
+  return content.some(
+    (c): c is TextContent => c.type === 'text' && c.text.trim().length > 0
+  );
+}
+
+/**
  * Get text content from a message, excluding thinking blocks
  */
 export function getTextContent(msg: AssistantMessage | UserMessage): string {
