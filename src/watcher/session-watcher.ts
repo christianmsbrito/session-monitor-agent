@@ -114,29 +114,36 @@ export class SessionWatcher {
       this.currentTranscriptPath = event.transcriptPath;
     }
 
-    // Ensure we have a doc agent for this session (lazy initialization)
-    // This handles cases where monitor starts after session begins, or SessionStart hook wasn't received
-    await this.ensureDocAgentForSession(event);
-
     // Handle different hook types
     switch (event.type) {
       case 'SessionStart':
-        // Already handled by ensureDocAgentForSession
+        // Create doc agent for new session
+        await this.ensureDocAgentForSession(event);
         break;
 
       case 'PostToolUse':
       case 'Stop':
       case 'SubagentStop':
+        // Create doc agent if needed (handles monitor starting mid-session)
+        await this.ensureDocAgentForSession(event);
         await this.processTranscript();
         break;
 
       case 'SessionEnd':
-        await this.handleSessionEnd(event);
+        // Only process SessionEnd if we have an active doc agent for this session
+        // This prevents creating ghost sessions for sessions we never tracked
+        if (this.docAgent && this.currentClaudeSessionId === event.sessionId) {
+          await this.handleSessionEnd(event);
+        } else if (this.verbose) {
+          console.error(`[watcher] Ignoring SessionEnd for untracked session: ${event.sessionId}`);
+        }
         break;
 
       default:
-        // Unknown hook type, try to process transcript anyway
-        await this.processTranscript();
+        // Unknown hook type, try to process transcript if we have an active session
+        if (this.docAgent) {
+          await this.processTranscript();
+        }
     }
   }
 

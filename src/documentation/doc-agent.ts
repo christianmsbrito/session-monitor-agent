@@ -709,6 +709,18 @@ Return ONLY the subject, nothing else. No quotes, no explanation.`,
    */
   async finalize(): Promise<void> {
     try {
+      // Skip finalization if no events were documented and no messages were processed
+      // This prevents hallucinating ghost sessions from empty context
+      const documentedCount = this.dedup.getCount();
+      const messageCount = this.contextManager.getMessageCount();
+
+      if (documentedCount === 0 && messageCount === 0) {
+        if (this.verbose) {
+          console.error('[doc-agent] Skipping finalization - no content to document');
+        }
+        return;
+      }
+
       const finalContext = this.contextManager.getFinalSummary();
 
       // If no subject was set yet, try to generate one from the context
