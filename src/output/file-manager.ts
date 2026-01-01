@@ -26,6 +26,7 @@ export class FileManager {
   private sessionSubject: string | null = null;
   private dateStr: string;
   private shortSessionId: string;
+  private subjectLocked: boolean = false;  // Prevents subject changes after finding existing dir
 
   constructor(
     private outputDir: string,
@@ -44,10 +45,60 @@ export class FileManager {
   }
 
   /**
+   * Check for and reuse an existing session directory for this session ID.
+   * This prevents session fragmentation when the monitor restarts mid-session.
+   * Should be called early, before any writes.
+   */
+  async findExistingSessionDir(): Promise<boolean> {
+    const dateDir = path.join(this.outputDir, 'sessions', this.dateStr);
+
+    try {
+      const entries = await fs.readdir(dateDir);
+
+      // Look for directories that start with our short session ID
+      const matchingDirs = entries.filter((e) => e.startsWith(this.shortSessionId + '-'));
+
+      if (matchingDirs.length > 0) {
+        // Use the first matching directory (they should all be the same session)
+        const existingDir = matchingDirs[0];
+        this.sessionDir = path.join(dateDir, existingDir);
+        this.eventsDir = path.join(this.sessionDir, 'events');
+        this.summariesDir = path.join(this.sessionDir, 'summaries');
+
+        // Extract the subject from the directory name
+        const subjectSlug = existingDir.slice(this.shortSessionId.length + 1);
+        if (subjectSlug) {
+          this.sessionSubject = subjectSlug;
+          this.subjectLocked = true;  // Don't allow subject changes
+        }
+
+        // Count existing events to continue numbering
+        try {
+          const eventFiles = await fs.readdir(this.eventsDir);
+          this.eventCounter = eventFiles.filter((f) => f.endsWith('.md')).length;
+        } catch {
+          // Events dir might not exist yet
+        }
+
+        this.initialized = true;
+        return true;
+      }
+    } catch {
+      // Date directory might not exist yet
+    }
+
+    return false;
+  }
+
+  /**
    * Set the session subject/title - updates directory name
-   * Should be called early, before writing many files
+   * Should be called early, before writing many files.
+   * Once a subject is locked (from finding existing directory), it won't change.
    */
   async setSessionSubject(subject: string): Promise<void> {
+    // Don't change subject if it's locked (reusing existing directory)
+    if (this.subjectLocked) return;
+
     if (this.sessionSubject === subject) return;
 
     const slug = this.slugify(subject);
@@ -57,12 +108,14 @@ export class FileManager {
     const newDirName = `${this.shortSessionId}-${slug}`;
     const newSessionDir = path.join(this.outputDir, 'sessions', this.dateStr, newDirName);
 
-    // If already initialized with files, rename the directory
+    // If already initialized with files, try to rename the directory
     if (this.initialized && oldSessionDir !== newSessionDir) {
       try {
         await fs.rename(oldSessionDir, newSessionDir);
       } catch {
-        // Directory might not exist yet or rename failed, that's ok
+        // Rename failed - keep using old directory to prevent fragmentation
+        // This can happen if another process is using the directory
+        return;
       }
     }
 
@@ -77,6 +130,13 @@ export class FileManager {
    */
   getSessionSubject(): string | null {
     return this.sessionSubject;
+  }
+
+  /**
+   * Check if subject is locked (from reusing existing directory)
+   */
+  isSubjectLocked(): boolean {
+    return this.subjectLocked;
   }
 
   /**

@@ -179,6 +179,7 @@ export class DocumentationAgent {
   private pendingBatch: StreamMessage[] = [];
   private verbose: boolean;
   private sessionSubjectSet: boolean = false;
+  private initialized: boolean = false;
 
   constructor(private config: DocAgentConfig) {
     this.client = new Anthropic({ apiKey: config.apiKey });
@@ -188,6 +189,25 @@ export class DocumentationAgent {
     this.fileManager = new FileManager(config.outputDir, config.sessionId);
     this.formatter = new MarkdownFormatter();
     this.verbose = config.verbose ?? false;
+  }
+
+  /**
+   * Initialize the doc agent - finds existing session directory if one exists.
+   * This prevents session fragmentation when the monitor restarts mid-session.
+   */
+  private async ensureInitialized(): Promise<void> {
+    if (this.initialized) return;
+    this.initialized = true;
+
+    // Check if there's an existing directory for this session
+    const foundExisting = await this.fileManager.findExistingSessionDir();
+    if (foundExisting) {
+      // Subject is already set from the existing directory
+      this.sessionSubjectSet = this.fileManager.isSubjectLocked();
+      if (this.verbose) {
+        console.error(`[doc-agent] Reusing existing session directory: ${this.fileManager.getSessionDir()}`);
+      }
+    }
   }
 
   /**
@@ -201,6 +221,9 @@ export class DocumentationAgent {
     }
 
     this.processing = true;
+
+    // Ensure we've checked for existing session directory
+    await this.ensureInitialized();
 
     try {
       // Add messages to context manager
