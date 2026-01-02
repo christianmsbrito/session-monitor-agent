@@ -16,14 +16,38 @@ export interface WatcherConfig extends Config {
   socketPath?: string;
 }
 
+/**
+ * State for a single Claude Code session
+ */
+interface SessionState {
+  /** Claude Code session ID */
+  sessionId: string;
+
+  /** Path to this session's transcript file */
+  transcriptPath: string;
+
+  /** MessageRouter for this session's message batching */
+  router: MessageRouter;
+
+  /** DocumentationAgent for this session */
+  docAgent: DocumentationAgent;
+
+  /** When this session was first seen */
+  createdAt: Date;
+
+  /** When this session was last active */
+  lastActivityAt: Date;
+
+  /** Whether this session has been finalized */
+  finalized: boolean;
+}
+
 export class SessionWatcher {
   private socketServer: SocketServer;
   private transcriptReader: TranscriptReader;
-  private router: MessageRouter;
-  private docAgent: DocumentationAgent | null = null;
+  /** Map of sessionId -> SessionState for all active sessions */
+  private sessions: Map<string, SessionState> = new Map();
   private monitorSessionId: string;
-  private currentClaudeSessionId: string | null = null;
-  private currentTranscriptPath: string | null = null;
   private verbose: boolean;
   private messageCount: number = 0;
   private hookCount: number = 0;
@@ -39,13 +63,8 @@ export class SessionWatcher {
 
     this.transcriptReader = new TranscriptReader();
 
-    this.router = new MessageRouter({
-      maxQueueSize: config.maxQueueSize,
-      batchSize: config.batchSize,
-      flushIntervalMs: config.flushIntervalMs,
-    });
-
-    // Note: docAgent is created per Claude Code session, not here
+    // Sessions are created lazily when events arrive
+    // Each session gets its own MessageRouter + DocumentationAgent
 
     // Wire up the pipeline
     this.setupPipeline();
@@ -76,29 +95,70 @@ export class SessionWatcher {
       }
     });
 
-    // Batches from router go to doc agent
-    this.router.onBatch(async (batch) => {
-      if (!this.docAgent) {
-        if (this.verbose) {
-          console.error('[watcher] No active doc agent, skipping batch');
-        }
-        return;
-      }
+    // Note: Per-session router->docAgent wiring happens in createSession()
+  }
+
+  /**
+   * Create a new session with its own router and doc agent
+   */
+  private createSession(sessionId: string, transcriptPath: string): SessionState {
+    // Create per-session router
+    const router = new MessageRouter({
+      maxQueueSize: this.config.maxQueueSize,
+      batchSize: this.config.batchSize,
+      flushIntervalMs: this.config.flushIntervalMs,
+    });
+
+    // Create per-session doc agent
+    const docAgent = new DocumentationAgent({
+      apiKey: this.config.apiKey,
+      model: this.config.docModel,
+      outputDir: this.config.outputDir,
+      sessionId: sessionId,
+      verbose: this.config.verbose,
+    });
+
+    // Wire this session's router to its doc agent
+    router.onBatch(async (batch) => {
       try {
-        await this.docAgent.processBatch(batch);
+        await docAgent.processBatch(batch);
       } catch (error) {
         if (this.verbose) {
-          console.error('[watcher] Error processing batch:', error);
+          console.error(`[watcher] Error processing batch for session ${sessionId}:`, error);
         }
       }
     });
 
-    // Log dropped messages
+    // Log dropped messages for this session
     if (this.verbose) {
-      this.router.onDropped(() => {
-        console.error('[watcher] Message dropped due to queue full');
+      router.onDropped(() => {
+        console.error(`[watcher] Message dropped (session: ${sessionId})`);
       });
     }
+
+    const now = new Date();
+    const session: SessionState = {
+      sessionId,
+      transcriptPath,
+      router,
+      docAgent,
+      createdAt: now,
+      lastActivityAt: now,
+      finalized: false,
+    };
+
+    this.sessions.set(sessionId, session);
+
+    // Reset transcript reader position for new session
+    this.transcriptReader.resetPosition(transcriptPath);
+
+    if (this.verbose) {
+      console.error(`[watcher] Created session: ${sessionId}`);
+      console.error(`[watcher] Transcript: ${transcriptPath}`);
+      console.error(`[watcher] Active sessions: ${this.sessions.size}`);
+    }
+
+    return session;
   }
 
   /**
@@ -109,153 +169,166 @@ export class SessionWatcher {
       console.error(`[watcher] Hook: ${event.type} (session: ${event.sessionId})`);
     }
 
-    // Update transcript path if provided
-    if (event.transcriptPath) {
-      this.currentTranscriptPath = event.transcriptPath;
-    }
-
     // Handle different hook types
     switch (event.type) {
       case 'SessionStart':
-        // Create doc agent for new session
-        await this.ensureDocAgentForSession(event);
+        // Create session eagerly on SessionStart (but lazily is also fine)
+        try {
+          this.getOrCreateSession(event);
+        } catch (error) {
+          if (this.verbose) {
+            console.error(`[watcher] Failed to create session: ${error}`);
+          }
+        }
         break;
 
       case 'PostToolUse':
       case 'Stop':
       case 'SubagentStop':
-        // Create doc agent if needed (handles monitor starting mid-session)
-        await this.ensureDocAgentForSession(event);
-        await this.processTranscript();
+        // Get or create session and process transcript
+        try {
+          const session = this.getOrCreateSession(event);
+          await this.processTranscriptForSession(session);
+        } catch (error) {
+          if (this.verbose) {
+            console.error(`[watcher] Failed to process event: ${error}`);
+          }
+        }
         break;
 
       case 'SessionEnd':
-        // Only process SessionEnd if we have an active doc agent for this session
+        // Only process SessionEnd if we have an active session for it
         // This prevents creating ghost sessions for sessions we never tracked
-        if (this.docAgent && this.currentClaudeSessionId === event.sessionId) {
-          await this.handleSessionEnd(event);
-        } else if (this.verbose) {
-          console.error(`[watcher] Ignoring SessionEnd for untracked session: ${event.sessionId}`);
+        {
+          const session = this.sessions.get(event.sessionId);
+          if (session && !session.finalized) {
+            await this.handleSessionEnd(session);
+          } else if (this.verbose) {
+            console.error(`[watcher] Ignoring SessionEnd for untracked session: ${event.sessionId}`);
+          }
         }
         break;
 
       default:
-        // Unknown hook type, try to process transcript if we have an active session
-        if (this.docAgent) {
-          await this.processTranscript();
+        // Unknown hook type, try to process if we have a session for this event
+        {
+          const existingSession = this.sessions.get(event.sessionId);
+          if (existingSession && !existingSession.finalized) {
+            await this.processTranscriptForSession(existingSession);
+          }
         }
     }
   }
 
   /**
-   * Ensure we have a DocumentationAgent for the given session
-   * Creates one if needed (lazy initialization for when SessionStart isn't received)
+   * Get or create a session for the given event
+   * Returns the session state for further processing
    */
-  private async ensureDocAgentForSession(event: HookEvent): Promise<void> {
-    const claudeSessionId = event.sessionId;
+  private getOrCreateSession(event: HookEvent): SessionState {
+    const sessionId = event.sessionId;
+    const transcriptPath = event.transcriptPath;
 
-    // If we already have a doc agent for this session, nothing to do
-    if (this.docAgent && this.currentClaudeSessionId === claudeSessionId) {
-      return;
-    }
+    // Return existing session if found
+    const session = this.sessions.get(sessionId);
 
-    // If this is a new/different session, handle the transition
-    if (this.docAgent && this.currentClaudeSessionId && this.currentClaudeSessionId !== claudeSessionId) {
-      if (this.verbose) {
-        console.error(`[watcher] Session changed from ${this.currentClaudeSessionId} to ${claudeSessionId}`);
-        console.error(`[watcher] Finalizing previous session...`);
+    if (session) {
+      // Update transcript path if it changed (shouldn't normally happen)
+      if (transcriptPath && session.transcriptPath !== transcriptPath) {
+        if (this.verbose) {
+          console.error(`[watcher] Transcript path changed for session ${sessionId}`);
+        }
+        session.transcriptPath = transcriptPath;
       }
-      // Flush any remaining messages for the previous session
-      await this.router.flushAll();
-      // Finalize the previous session's documentation
-      await this.docAgent.finalize();
+      // Update last activity
+      session.lastActivityAt = new Date();
+      return session;
     }
 
-    // Create a new DocumentationAgent for this Claude Code session
-    this.currentClaudeSessionId = claudeSessionId;
-    this.docAgent = new DocumentationAgent({
-      apiKey: this.config.apiKey,
-      model: this.config.docModel,
-      outputDir: this.config.outputDir,
-      sessionId: claudeSessionId,
-      verbose: this.config.verbose,
-    });
-
-    if (this.verbose) {
-      console.error(`[watcher] Created doc agent for session: ${claudeSessionId}`);
-      if (event.transcriptPath) {
-        console.error(`[watcher] Transcript: ${event.transcriptPath}`);
-      }
+    // Create new session
+    if (!transcriptPath) {
+      // This shouldn't happen in normal operation, but handle gracefully
+      throw new Error(`Cannot create session ${sessionId} without transcript path`);
     }
 
-    // Reset transcript reader position for new session
-    if (event.transcriptPath) {
-      this.transcriptReader.resetPosition(event.transcriptPath);
-    }
+    return this.createSession(sessionId, transcriptPath);
   }
 
   /**
-   * Handle session end
+   * Handle session end - finalize documentation for this session only
    */
-  private async handleSessionEnd(event: HookEvent): Promise<void> {
+  private async handleSessionEnd(session: SessionState): Promise<void> {
+    if (session.finalized) {
+      return; // Already finalized
+    }
+
     if (this.verbose) {
-      console.error(`[watcher] Session ended: ${event.sessionId}`);
+      console.error(`[watcher] Session ending: ${session.sessionId}`);
     }
 
     // Process any remaining transcript content
-    await this.processTranscript();
+    await this.processTranscriptForSession(session);
 
-    // Flush remaining messages
-    await this.router.flushAll();
+    // Flush remaining messages in this session's router
+    await session.router.flushAll();
 
     // Finalize this session's documentation
-    if (this.docAgent) {
-      await this.docAgent.finalize();
-      const stats = this.docAgent.getStats();
-      console.error(`[watcher] Session ${event.sessionId} complete.`);
-      console.error(`[watcher] Events documented: ${stats.documentedCount}`);
-    }
+    await session.docAgent.finalize();
+    const stats = session.docAgent.getStats();
+    console.error(`[watcher] Session ${session.sessionId} complete.`);
+    console.error(`[watcher] Events documented: ${stats.documentedCount}`);
 
-    // Clear the current session
-    this.currentClaudeSessionId = null;
-    this.docAgent = null;
+    // Clean up this session's router
+    session.router.destroy();
+
+    // Mark as finalized (but keep in map for stats/debugging)
+    session.finalized = true;
+
+    if (this.verbose) {
+      console.error(`[watcher] Active sessions: ${this.getActiveSessionCount()}`);
+    }
   }
 
   /**
-   * Read and process new transcript entries
+   * Get count of non-finalized sessions
    */
-  private async processTranscript(): Promise<void> {
-    if (!this.currentTranscriptPath) {
-      return;
-    }
+  private getActiveSessionCount(): number {
+    return Array.from(this.sessions.values()).filter(s => !s.finalized).length;
+  }
 
+  /**
+   * Read and process new transcript entries for a specific session
+   */
+  private async processTranscriptForSession(session: SessionState): Promise<void> {
     try {
       const entries = await this.transcriptReader.readNewEntries(
-        this.currentTranscriptPath
+        session.transcriptPath
       );
 
       if (entries.length === 0) {
         return;
       }
 
-      // Convert to stream messages and enqueue
+      // Convert to stream messages and enqueue to this session's router
       const messages = this.transcriptReader.toStreamMessages(entries, this.verbose);
       this.messageCount += messages.length;
 
       if (this.verbose) {
-        console.error(`[watcher] Read ${entries.length} entries, converted to ${messages.length} messages`);
+        console.error(`[watcher] Session ${session.sessionId}: Read ${entries.length} entries, converted to ${messages.length} messages`);
       }
 
       for (const msg of messages) {
-        this.router.enqueue(msg);
+        session.router.enqueue(msg);
       }
 
+      // Update last activity
+      session.lastActivityAt = new Date();
+
       if (this.verbose && messages.length > 0) {
-        console.error(`[watcher] Processed ${messages.length} new messages`);
+        console.error(`[watcher] Session ${session.sessionId}: Processed ${messages.length} new messages`);
       }
     } catch (error) {
       if (this.verbose) {
-        console.error(`[watcher] Error reading transcript: ${error}`);
+        console.error(`[watcher] Session ${session.sessionId}: Error reading transcript: ${error}`);
       }
     }
   }
@@ -285,25 +358,36 @@ export class SessionWatcher {
   async shutdown(): Promise<void> {
     console.error('\n[session-monitor] Shutting down...');
 
-    // Stop socket server
+    // Stop accepting new connections
     await this.socketServer.stop();
 
-    // Flush remaining messages
-    await this.router.flushAll();
+    // Finalize all active sessions
+    const activeSessions = Array.from(this.sessions.values()).filter(s => !s.finalized);
 
-    // Finalize any active session's documentation
-    if (this.docAgent) {
-      await this.docAgent.finalize();
-      const stats = this.docAgent.getStats();
-      console.error(`[session-monitor] Final session events documented: ${stats.documentedCount}`);
+    if (activeSessions.length > 0) {
+      console.error(`[session-monitor] Finalizing ${activeSessions.length} active session(s)...`);
+
+      // Finalize sessions in parallel for faster shutdown
+      await Promise.all(
+        activeSessions.map(async (session) => {
+          try {
+            await this.handleSessionEnd(session);
+          } catch (error) {
+            console.error(`[session-monitor] Error finalizing session ${session.sessionId}:`, error);
+          }
+        })
+      );
     }
 
-    // Clean up
-    this.router.destroy();
+    // Report final statistics
+    const totalDocumented = Array.from(this.sessions.values())
+      .reduce((sum, s) => sum + s.docAgent.getStats().documentedCount, 0);
 
     console.error(`[session-monitor] Monitor stopped.`);
+    console.error(`[session-monitor] Total sessions tracked: ${this.sessions.size}`);
     console.error(`[session-monitor] Hooks received: ${this.hookCount}`);
     console.error(`[session-monitor] Messages processed: ${this.messageCount}`);
+    console.error(`[session-monitor] Total events documented: ${totalDocumented}`);
 
     process.exit(0);
   }
@@ -326,10 +410,24 @@ export class SessionWatcher {
   }
 
   /**
-   * Get current Claude Code session ID (if any)
+   * Get all active (non-finalized) Claude Code session IDs
+   */
+  getActiveSessionIds(): string[] {
+    return Array.from(this.sessions.values())
+      .filter(s => !s.finalized)
+      .map(s => s.sessionId);
+  }
+
+  /**
+   * Get current Claude Code session ID (for backward compatibility)
+   * Returns the most recently active session, or null if none
+   * @deprecated Use getActiveSessionIds() for multi-session support
    */
   getCurrentClaudeSessionId(): string | null {
-    return this.currentClaudeSessionId;
+    const active = Array.from(this.sessions.values())
+      .filter(s => !s.finalized)
+      .sort((a, b) => b.lastActivityAt.getTime() - a.lastActivityAt.getTime());
+    return active.length > 0 ? active[0].sessionId : null;
   }
 
   /**
@@ -338,16 +436,32 @@ export class SessionWatcher {
   getStats(): {
     hookCount: number;
     messageCount: number;
-    currentClaudeSessionId: string | null;
-    routerStats: ReturnType<MessageRouter['getStats']>;
-    docStats: ReturnType<DocumentationAgent['getStats']> | null;
+    totalSessions: number;
+    activeSessions: number;
+    sessions: Array<{
+      sessionId: string;
+      createdAt: Date;
+      lastActivityAt: Date;
+      finalized: boolean;
+      routerStats: ReturnType<MessageRouter['getStats']>;
+      docStats: ReturnType<DocumentationAgent['getStats']>;
+    }>;
   } {
+    const sessionStats = Array.from(this.sessions.values()).map(s => ({
+      sessionId: s.sessionId,
+      createdAt: s.createdAt,
+      lastActivityAt: s.lastActivityAt,
+      finalized: s.finalized,
+      routerStats: s.router.getStats(),
+      docStats: s.docAgent.getStats(),
+    }));
+
     return {
       hookCount: this.hookCount,
       messageCount: this.messageCount,
-      currentClaudeSessionId: this.currentClaudeSessionId,
-      routerStats: this.router.getStats(),
-      docStats: this.docAgent?.getStats() ?? null,
+      totalSessions: this.sessions.size,
+      activeSessions: this.getActiveSessionCount(),
+      sessions: sessionStats,
     };
   }
 }
