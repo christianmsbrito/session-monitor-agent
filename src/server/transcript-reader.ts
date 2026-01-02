@@ -196,4 +196,11 @@ export class TranscriptReader {
   getPosition(transcriptPath: string): number {
     return this.lastPosition.get(transcriptPath) || 0;
   }
+
+  /**
+   * Set position for a transcript (used when restoring from persisted state)
+   */
+  setPosition(transcriptPath: string, position: number): void {
+    this.lastPosition.set(transcriptPath, position);
+  }
 }

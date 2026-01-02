@@ -59,8 +59,8 @@ export class FileManager {
       const matchingDirs = entries.filter((e) => e.startsWith(this.shortSessionId + '-'));
 
       if (matchingDirs.length > 0) {
-        // Use the first matching directory (they should all be the same session)
-        const existingDir = matchingDirs[0];
+        // Select the directory with the most events (most active session)
+        const existingDir = await this.selectBestDirectory(dateDir, matchingDirs);
         this.sessionDir = path.join(dateDir, existingDir);
         this.eventsDir = path.join(this.sessionDir, 'events');
         this.summariesDir = path.join(this.sessionDir, 'summaries');
@@ -72,10 +72,10 @@ export class FileManager {
           this.subjectLocked = true;  // Don't allow subject changes
         }
 
-        // Count existing events to continue numbering
+        // Find highest event number to continue numbering correctly
         try {
           const eventFiles = await fs.readdir(this.eventsDir);
-          this.eventCounter = eventFiles.filter((f) => f.endsWith('.md')).length;
+          this.eventCounter = this.findHighestEventNumber(eventFiles);
         } catch {
           // Events dir might not exist yet
         }
@@ -88,6 +88,35 @@ export class FileManager {
     }
 
     return false;
+  }
+
+  /**
+   * Select the best directory when multiple exist for the same session.
+   * Picks the one with the most events (most active documentation).
+   */
+  private async selectBestDirectory(dateDir: string, dirs: string[]): Promise<string> {
+    if (dirs.length === 1) {
+      return dirs[0];
+    }
+
+    let bestDir = dirs[0];
+    let maxEvents = 0;
+
+    for (const dir of dirs) {
+      try {
+        const eventsPath = path.join(dateDir, dir, 'events');
+        const files = await fs.readdir(eventsPath);
+        const eventCount = files.filter(f => f.endsWith('.md')).length;
+        if (eventCount > maxEvents) {
+          maxEvents = eventCount;
+          bestDir = dir;
+        }
+      } catch {
+        // Events dir doesn't exist, count as 0
+      }
+    }
+
+    return bestDir;
   }
 
   /**
@@ -462,6 +491,28 @@ export class FileManager {
   }
 
   /**
+   * Find the highest event number from a list of event filenames.
+   * Handles files like "001-user_request.md", "INVALIDATED-002-foo.md", etc.
+   */
+  private findHighestEventNumber(files: string[]): number {
+    let highest = 0;
+    const eventNumberPattern = /^(?:INVALIDATED-)?(\d{3})-/;
+
+    for (const file of files) {
+      if (!file.endsWith('.md')) continue;
+      const match = file.match(eventNumberPattern);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > highest) {
+          highest = num;
+        }
+      }
+    }
+
+    return highest;
+  }
+
+  /**
    * Get session directory path
    */
   getSessionDir(): string {
@@ -473,5 +524,51 @@ export class FileManager {
    */
   getEventCount(): number {
     return this.eventCounter;
+  }
+
+  /**
+   * Save deduplication state to the session directory.
+   * This allows resuming a session without re-documenting the same events.
+   */
+  async saveDedupState(items: Array<{ hash: string; title: string; eventType: string; timestamp: Date }>): Promise<void> {
+    await this.initialize();
+    const filepath = path.join(this.sessionDir, '.dedup-state.json');
+    await fs.writeFile(filepath, JSON.stringify(items, null, 2), 'utf-8');
+  }
+
+  /**
+   * Load deduplication state from the session directory.
+   * Returns null if no state file exists.
+   */
+  async loadDedupState(): Promise<Array<{ hash: string; title: string; eventType: string; timestamp: string }> | null> {
+    try {
+      const filepath = path.join(this.sessionDir, '.dedup-state.json');
+      const content = await fs.readFile(filepath, 'utf-8');
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Save transcript position for resuming later.
+   */
+  async saveTranscriptPosition(transcriptPath: string, position: number): Promise<void> {
+    await this.initialize();
+    const filepath = path.join(this.sessionDir, '.transcript-position.json');
+    await fs.writeFile(filepath, JSON.stringify({ transcriptPath, position }), 'utf-8');
+  }
+
+  /**
+   * Load transcript position for resuming.
+   */
+  async loadTranscriptPosition(): Promise<{ transcriptPath: string; position: number } | null> {
+    try {
+      const filepath = path.join(this.sessionDir, '.transcript-position.json');
+      const content = await fs.readFile(filepath, 'utf-8');
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
   }
 }

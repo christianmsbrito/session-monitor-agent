@@ -180,6 +180,7 @@ export class DocumentationAgent {
   private verbose: boolean;
   private sessionSubjectSet: boolean = false;
   private initialized: boolean = false;
+  private restoredTranscriptPosition: { path: string; position: number } | null = null;
 
   constructor(private config: DocAgentConfig) {
     this.client = new Anthropic({ apiKey: config.apiKey });
@@ -206,6 +207,33 @@ export class DocumentationAgent {
       this.sessionSubjectSet = this.fileManager.isSubjectLocked();
       if (this.verbose) {
         console.error(`[doc-agent] Reusing existing session directory: ${this.fileManager.getSessionDir()}`);
+      }
+
+      // Load persisted deduplication state to prevent re-documenting events
+      const dedupState = await this.fileManager.loadDedupState();
+      if (dedupState) {
+        const items = dedupState.map(item => ({
+          hash: item.hash,
+          title: item.title,
+          eventType: item.eventType as EventType,
+          timestamp: new Date(item.timestamp),
+        }));
+        this.dedup.import(items);
+        if (this.verbose) {
+          console.error(`[doc-agent] Loaded ${items.length} dedup entries from previous session`);
+        }
+      }
+
+      // Load persisted transcript position to avoid re-processing
+      const transcriptPos = await this.fileManager.loadTranscriptPosition();
+      if (transcriptPos) {
+        this.restoredTranscriptPosition = {
+          path: transcriptPos.transcriptPath,
+          position: transcriptPos.position,
+        };
+        if (this.verbose) {
+          console.error(`[doc-agent] Loaded transcript position: ${transcriptPos.position} bytes`);
+        }
       }
     }
   }
@@ -277,6 +305,8 @@ export class DocumentationAgent {
       // Update running session summary after each significant batch
       if (events.length > 0) {
         await this.updateRunningSummary();
+        // Persist dedup state to prevent re-documenting on restart
+        await this.saveDedupState();
       }
     } catch (error) {
       if (this.verbose) {
@@ -833,6 +863,20 @@ Return ONLY the subject, nothing else.`,
   }
 
   /**
+   * Save deduplication state to disk for session resumption
+   */
+  private async saveDedupState(): Promise<void> {
+    try {
+      const items = this.dedup.export();
+      await this.fileManager.saveDedupState(items);
+    } catch (error) {
+      if (this.verbose) {
+        console.error('[doc-agent] Error saving dedup state:', error);
+      }
+    }
+  }
+
+  /**
    * Get statistics
    */
   getStats(): {
@@ -843,6 +887,36 @@ Return ONLY the subject, nothing else.`,
       documentedCount: this.dedup.getCount(),
       contextStats: this.contextManager.getStats(),
     };
+  }
+
+  /**
+   * Get the restored transcript position (if resuming a session)
+   * Returns null if this is a new session or no position was persisted
+   * NOTE: Must call initialize() first to ensure position is loaded
+   */
+  getRestoredTranscriptPosition(): { path: string; position: number } | null {
+    return this.restoredTranscriptPosition;
+  }
+
+  /**
+   * Initialize the doc agent explicitly (normally done lazily on first processBatch)
+   * Call this early if you need to check for restored transcript position
+   */
+  async initialize(): Promise<void> {
+    await this.ensureInitialized();
+  }
+
+  /**
+   * Save transcript position for later resumption
+   */
+  async saveTranscriptPosition(transcriptPath: string, position: number): Promise<void> {
+    try {
+      await this.fileManager.saveTranscriptPosition(transcriptPath, position);
+    } catch (error) {
+      if (this.verbose) {
+        console.error('[doc-agent] Error saving transcript position:', error);
+      }
+    }
   }
 
   /**

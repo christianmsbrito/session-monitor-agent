@@ -174,6 +174,353 @@ describe('FileManager', () => {
     });
   });
 
+  describe('findHighestEventNumber', () => {
+    it('should find highest event number from sequential files', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-my-session',
+      ] as unknown as fs.Dirent[]);
+
+      // Events with sequential numbers
+      mockedFs.readdir.mockResolvedValueOnce([
+        '001-user_request.md',
+        '002-agent_analysis.md',
+        '003-agent_suggestion.md',
+      ] as unknown as fs.Dirent[]);
+
+      await fileManager.findExistingSessionDir();
+
+      expect(fileManager.getEventCount()).toBe(3);
+    });
+
+    it('should handle gaps in event numbers', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-my-session',
+      ] as unknown as fs.Dirent[]);
+
+      // Events with gaps (001, 003, 005 - missing 002, 004)
+      mockedFs.readdir.mockResolvedValueOnce([
+        '001-user_request.md',
+        '003-agent_analysis.md',
+        '005-decision_made.md',
+      ] as unknown as fs.Dirent[]);
+
+      await fileManager.findExistingSessionDir();
+
+      // Should return highest number (5), not count (3)
+      expect(fileManager.getEventCount()).toBe(5);
+    });
+
+    it('should handle duplicate event numbers (same number, different types)', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-my-session',
+      ] as unknown as fs.Dirent[]);
+
+      // Multiple files with same event number (the bug we're fixing)
+      mockedFs.readdir.mockResolvedValueOnce([
+        '001-user_request.md',
+        '002-agent_analysis.md',
+        '003-user_request.md',
+        '003-user_confirmed.md',
+        '003-agent_analysis.md',
+      ] as unknown as fs.Dirent[]);
+
+      await fileManager.findExistingSessionDir();
+
+      // Should return highest number (3), so next event will be 4
+      expect(fileManager.getEventCount()).toBe(3);
+    });
+
+    it('should handle INVALIDATED prefixed files', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-my-session',
+      ] as unknown as fs.Dirent[]);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        '001-user_request.md',
+        '002-agent_analysis.md',
+        'INVALIDATED-003-agent_suggestion.md',
+        '004-decision_made.md',
+      ] as unknown as fs.Dirent[]);
+
+      await fileManager.findExistingSessionDir();
+
+      // Should recognize INVALIDATED-003 and return highest (4)
+      expect(fileManager.getEventCount()).toBe(4);
+    });
+
+    it('should handle high event numbers', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-my-session',
+      ] as unknown as fs.Dirent[]);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        '098-user_request.md',
+        '099-agent_analysis.md',
+        '100-agent_suggestion.md',
+        '101-decision_made.md',
+      ] as unknown as fs.Dirent[]);
+
+      await fileManager.findExistingSessionDir();
+
+      expect(fileManager.getEventCount()).toBe(101);
+    });
+
+    it('should return 0 for empty events directory', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-my-session',
+      ] as unknown as fs.Dirent[]);
+
+      mockedFs.readdir.mockResolvedValueOnce([] as unknown as fs.Dirent[]);
+
+      await fileManager.findExistingSessionDir();
+
+      expect(fileManager.getEventCount()).toBe(0);
+    });
+
+    it('should ignore non-event files', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-my-session',
+      ] as unknown as fs.Dirent[]);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        '001-user_request.md',
+        '002-agent_analysis.md',
+        '.DS_Store',
+        'README.md',
+        'random-file.txt',
+      ] as unknown as fs.Dirent[]);
+
+      await fileManager.findExistingSessionDir();
+
+      expect(fileManager.getEventCount()).toBe(2);
+    });
+  });
+
+  describe('selectBestDirectory', () => {
+    it('should select directory with most events when multiple exist', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      // Multiple directories for same session ID
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-explore-patterns',
+        'abc12345-tutor-reindexing',
+        'abc12345-verify-tests',
+      ] as unknown as fs.Dirent[]);
+
+      // Events count for each directory
+      // explore-patterns: 2 events
+      mockedFs.readdir.mockResolvedValueOnce([
+        '001-user_request.md',
+        '002-agent_analysis.md',
+      ] as unknown as fs.Dirent[]);
+
+      // tutor-reindexing: 50 events (most)
+      mockedFs.readdir.mockResolvedValueOnce(
+        Array.from({ length: 50 }, (_, i) =>
+          `${String(i + 1).padStart(3, '0')}-agent_analysis.md`
+        ) as unknown as fs.Dirent[]
+      );
+
+      // verify-tests: 3 events
+      mockedFs.readdir.mockResolvedValueOnce([
+        '001-user_request.md',
+        '002-agent_analysis.md',
+        '003-solution_verified.md',
+      ] as unknown as fs.Dirent[]);
+
+      // Final readdir for selected directory's events (for event count)
+      mockedFs.readdir.mockResolvedValueOnce(
+        Array.from({ length: 50 }, (_, i) =>
+          `${String(i + 1).padStart(3, '0')}-agent_analysis.md`
+        ) as unknown as fs.Dirent[]
+      );
+
+      const found = await fileManager.findExistingSessionDir();
+
+      expect(found).toBe(true);
+      // Should select tutor-reindexing (has most events)
+      expect(fileManager.getSessionDir()).toContain('tutor-reindexing');
+      expect(fileManager.getEventCount()).toBe(50);
+    });
+
+    it('should handle directories with missing events folder', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-empty-session',
+        'abc12345-active-session',
+      ] as unknown as fs.Dirent[]);
+
+      // First directory has no events folder
+      mockedFs.readdir.mockRejectedValueOnce(new Error('ENOENT'));
+
+      // Second directory has events
+      mockedFs.readdir.mockResolvedValueOnce([
+        '001-user_request.md',
+        '002-agent_analysis.md',
+      ] as unknown as fs.Dirent[]);
+
+      // Final readdir for selected directory's events
+      mockedFs.readdir.mockResolvedValueOnce([
+        '001-user_request.md',
+        '002-agent_analysis.md',
+      ] as unknown as fs.Dirent[]);
+
+      const found = await fileManager.findExistingSessionDir();
+
+      expect(found).toBe(true);
+      expect(fileManager.getSessionDir()).toContain('active-session');
+    });
+
+    it('should use first directory when all have zero events', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readdir.mockResolvedValueOnce([
+        'abc12345-session-a',
+        'abc12345-session-b',
+      ] as unknown as fs.Dirent[]);
+
+      // Both directories have empty events
+      mockedFs.readdir.mockResolvedValueOnce([] as unknown as fs.Dirent[]);
+      mockedFs.readdir.mockResolvedValueOnce([] as unknown as fs.Dirent[]);
+
+      // Final readdir for selected directory
+      mockedFs.readdir.mockResolvedValueOnce([] as unknown as fs.Dirent[]);
+
+      const found = await fileManager.findExistingSessionDir();
+
+      expect(found).toBe(true);
+      expect(fileManager.getSessionDir()).toContain('session-a');
+    });
+  });
+
+  describe('dedup state persistence', () => {
+    it('should save dedup state to session directory', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.mkdir.mockResolvedValue(undefined);
+      mockedFs.access.mockRejectedValue(new Error('ENOENT'));
+      mockedFs.writeFile.mockResolvedValue(undefined);
+
+      const dedupItems = [
+        { hash: 'abc123', title: 'Test Event', eventType: 'user_request', timestamp: new Date('2025-12-30T12:00:00Z') },
+        { hash: 'def456', title: 'Another Event', eventType: 'agent_analysis', timestamp: new Date('2025-12-30T12:05:00Z') },
+      ];
+
+      await fileManager.saveDedupState(dedupItems);
+
+      expect(mockedFs.writeFile).toHaveBeenCalledWith(
+        expect.stringContaining('.dedup-state.json'),
+        expect.any(String),
+        'utf-8'
+      );
+
+      // Verify JSON format
+      const writeCall = mockedFs.writeFile.mock.calls.find(
+        call => String(call[0]).includes('.dedup-state.json')
+      );
+      expect(writeCall).toBeDefined();
+      const savedData = JSON.parse(writeCall![1] as string);
+      expect(savedData).toHaveLength(2);
+      expect(savedData[0].hash).toBe('abc123');
+    });
+
+    it('should load dedup state from session directory', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      const savedState = JSON.stringify([
+        { hash: 'abc123', title: 'Test Event', eventType: 'user_request', timestamp: '2025-12-30T12:00:00.000Z' },
+        { hash: 'def456', title: 'Another Event', eventType: 'agent_analysis', timestamp: '2025-12-30T12:05:00.000Z' },
+      ]);
+
+      mockedFs.readFile.mockResolvedValueOnce(savedState);
+
+      const loaded = await fileManager.loadDedupState();
+
+      expect(loaded).not.toBeNull();
+      expect(loaded).toHaveLength(2);
+      expect(loaded![0].hash).toBe('abc123');
+      expect(loaded![1].title).toBe('Another Event');
+    });
+
+    it('should return null when no dedup state file exists', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readFile.mockRejectedValueOnce(new Error('ENOENT'));
+
+      const loaded = await fileManager.loadDedupState();
+
+      expect(loaded).toBeNull();
+    });
+  });
+
+  describe('transcript position persistence', () => {
+    it('should save transcript position', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.mkdir.mockResolvedValue(undefined);
+      mockedFs.access.mockRejectedValue(new Error('ENOENT'));
+      mockedFs.writeFile.mockResolvedValue(undefined);
+
+      await fileManager.saveTranscriptPosition('/path/to/transcript.jsonl', 12345);
+
+      expect(mockedFs.writeFile).toHaveBeenCalledWith(
+        expect.stringContaining('.transcript-position.json'),
+        expect.any(String),
+        'utf-8'
+      );
+
+      const writeCall = mockedFs.writeFile.mock.calls.find(
+        call => String(call[0]).includes('.transcript-position.json')
+      );
+      expect(writeCall).toBeDefined();
+      const savedData = JSON.parse(writeCall![1] as string);
+      expect(savedData.transcriptPath).toBe('/path/to/transcript.jsonl');
+      expect(savedData.position).toBe(12345);
+    });
+
+    it('should load transcript position', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      const savedState = JSON.stringify({
+        transcriptPath: '/path/to/transcript.jsonl',
+        position: 54321,
+      });
+
+      mockedFs.readFile.mockResolvedValueOnce(savedState);
+
+      const loaded = await fileManager.loadTranscriptPosition();
+
+      expect(loaded).not.toBeNull();
+      expect(loaded!.transcriptPath).toBe('/path/to/transcript.jsonl');
+      expect(loaded!.position).toBe(54321);
+    });
+
+    it('should return null when no position file exists', async () => {
+      const fileManager = new FileManager(outputDir, sessionId);
+
+      mockedFs.readFile.mockRejectedValueOnce(new Error('ENOENT'));
+
+      const loaded = await fileManager.loadTranscriptPosition();
+
+      expect(loaded).toBeNull();
+    });
+  });
+
   describe('slugify behavior', () => {
     it('should create proper slugs from session subjects', async () => {
       const fileManager = new FileManager(outputDir, sessionId);

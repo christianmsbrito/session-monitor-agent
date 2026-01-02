@@ -149,8 +149,9 @@ export class SessionWatcher {
 
     this.sessions.set(sessionId, session);
 
-    // Reset transcript reader position for new session
-    this.transcriptReader.resetPosition(transcriptPath);
+    // Initialize doc agent early to check for restored transcript position
+    // This prevents re-reading already-processed transcript content on resume
+    this.initializeSessionAsync(session, transcriptPath);
 
     if (this.verbose) {
       console.error(`[watcher] Created session: ${sessionId}`);
@@ -159,6 +160,33 @@ export class SessionWatcher {
     }
 
     return session;
+  }
+
+  /**
+   * Initialize session asynchronously - restores transcript position if resuming
+   */
+  private async initializeSessionAsync(session: SessionState, transcriptPath: string): Promise<void> {
+    try {
+      // Initialize doc agent to load any persisted state
+      await session.docAgent.initialize();
+
+      // Check for restored transcript position
+      const restored = session.docAgent.getRestoredTranscriptPosition();
+      if (restored && restored.path === transcriptPath) {
+        // Resume from persisted position
+        this.transcriptReader.setPosition(transcriptPath, restored.position);
+        if (this.verbose) {
+          console.error(`[watcher] Restored transcript position for session ${session.sessionId}: ${restored.position} bytes`);
+        }
+      } else {
+        // New session - start from beginning (default behavior, no reset needed)
+        // TranscriptReader returns 0 for unknown paths
+      }
+    } catch (error) {
+      if (this.verbose) {
+        console.error(`[watcher] Error initializing session ${session.sessionId}:`, error);
+      }
+    }
   }
 
   /**
@@ -322,6 +350,10 @@ export class SessionWatcher {
 
       // Update last activity
       session.lastActivityAt = new Date();
+
+      // Save transcript position for later resumption
+      const currentPosition = this.transcriptReader.getPosition(session.transcriptPath);
+      await session.docAgent.saveTranscriptPosition(session.transcriptPath, currentPosition);
 
       if (this.verbose && messages.length > 0) {
         console.error(`[watcher] Session ${session.sessionId}: Processed ${messages.length} new messages`);
