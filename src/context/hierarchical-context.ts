@@ -16,6 +16,7 @@ import {
   getToolResults,
   hasUserFacingContent,
   hasActualUserText,
+  generateMessageId,
 } from '../types/index.js';
 
 export interface ContextConfig {
@@ -34,6 +35,16 @@ const DEFAULT_CONFIG: ContextConfig = {
   summarizeAfter: 200,     // Summarize less frequently
   maxContextTokens: 16000, // Allow larger context
 };
+
+/**
+ * Options for getContext() to support analyzed-message filtering
+ */
+export interface GetContextOptions {
+  /** Set of message IDs that have already been analyzed */
+  analyzedMessageIds?: Set<string>;
+  /** Formatted summaries of analyzed messages for cross-batch context */
+  analyzedSummaries?: string;
+}
 
 interface ContextTier {
   level: 'recent' | 'hourly' | 'session';
@@ -139,8 +150,12 @@ export class HierarchicalContextManager {
 
   /**
    * Get formatted context for the documentation agent
+   *
+   * @param options - Optional filtering for analyzed messages
+   *   - analyzedMessageIds: Messages to exclude from full "Recent Exchanges"
+   *   - analyzedSummaries: Brief summaries of analyzed messages for cross-batch context
    */
-  getContext(): string {
+  getContext(options?: GetContextOptions): string {
     const session = this.tiers.get('session')!;
     const hourly = this.tiers.get('hourly')!;
     const recent = this.tiers.get('recent')!;
@@ -157,11 +172,33 @@ export class HierarchicalContextManager {
       parts.push(`## Recent Period Summary\n\n${hourly.summary}`);
     }
 
-    // Recent messages (full detail)
-    if (recent.messages.length > 0) {
-      parts.push(
-        `## Recent Exchanges\n\n${this.formatMessages(recent.messages)}`
-      );
+    // Handle analyzed message filtering
+    if (options?.analyzedMessageIds && options.analyzedMessageIds.size > 0) {
+      // Add brief summaries of already-analyzed messages for cross-batch context
+      if (options.analyzedSummaries && options.analyzedSummaries.trim().length > 0) {
+        parts.push(
+          `## Previously Analyzed (for context only - do not re-document)\n\n${options.analyzedSummaries}`
+        );
+      }
+
+      // Filter recent messages - only include NEW (unanalyzed) ones in full detail
+      const newMessages = recent.messages.filter((m) => {
+        const id = generateMessageId(m);
+        return !options.analyzedMessageIds!.has(id);
+      });
+
+      if (newMessages.length > 0) {
+        parts.push(
+          `## New Messages to Analyze\n\n${this.formatMessages(newMessages)}`
+        );
+      }
+    } else {
+      // Backward compatible: no filtering, include all recent messages
+      if (recent.messages.length > 0) {
+        parts.push(
+          `## Recent Exchanges\n\n${this.formatMessages(recent.messages)}`
+        );
+      }
     }
 
     return parts.join('\n\n---\n\n');

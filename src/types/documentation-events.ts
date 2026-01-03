@@ -125,6 +125,7 @@ export interface DocumentedItem {
   title: string;
   eventType: EventType;
   timestamp: Date;
+  evidence?: string;  // Store evidence for similarity comparison
 }
 
 export interface SessionMetadata {

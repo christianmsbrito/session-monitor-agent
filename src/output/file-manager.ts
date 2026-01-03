@@ -247,6 +247,16 @@ export class FileManager {
   }
 
   /**
+   * Write complete session.md content (used by DB-backed mode)
+   * Regenerates the entire file from database state
+   */
+  async writeSessionMarkdown(content: string): Promise<void> {
+    await this.initialize();
+    const sessionPath = path.join(this.sessionDir, 'session.md');
+    await fs.writeFile(sessionPath, content, 'utf-8');
+  }
+
+  /**
    * Update the session.md header with subject if it was set after creation
    */
   async updateSessionHeader(): Promise<void> {
@@ -565,6 +575,37 @@ export class FileManager {
   async loadTranscriptPosition(): Promise<{ transcriptPath: string; position: number } | null> {
     try {
       const filepath = path.join(this.sessionDir, '.transcript-position.json');
+      const content = await fs.readFile(filepath, 'utf-8');
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Save analyzed message state to the session directory.
+   * This tracks which messages have been sent to Claude for analysis,
+   * preventing re-analysis of the same content.
+   */
+  async saveAnalyzedState(
+    items: Array<{ messageId: string; analyzedAt: string; briefSummary: string }>
+  ): Promise<void> {
+    await this.initialize();
+    const filepath = path.join(this.sessionDir, '.analyzed-messages.json');
+    await fs.writeFile(filepath, JSON.stringify(items, null, 2), 'utf-8');
+  }
+
+  /**
+   * Load analyzed message state from the session directory.
+   * Returns null if no state file exists.
+   */
+  async loadAnalyzedState(): Promise<Array<{
+    messageId: string;
+    analyzedAt: string;
+    briefSummary: string;
+  }> | null> {
+    try {
+      const filepath = path.join(this.sessionDir, '.analyzed-messages.json');
       const content = await fs.readFile(filepath, 'utf-8');
       return JSON.parse(content);
     } catch {

@@ -5,16 +5,23 @@
 
 import * as crypto from 'crypto';
 import type { DocumentedItem, EventType } from '../types/index.js';
+import type { DatabaseManager } from '../database/db-manager.js';
 
 export interface DeduplicationConfig {
   /** Similarity threshold for fuzzy matching (0-1, default: 0.7) */
-  similarityThreshold: number;
+  similarityThreshold?: number;
 
   /** Maximum items to keep in memory (default: 1000) */
-  maxItems: number;
+  maxItems?: number;
+
+  /** Optional database for persistence */
+  db?: DatabaseManager;
+
+  /** Session ID (required if db is provided) */
+  sessionId?: string;
 }
 
-const DEFAULT_CONFIG: DeduplicationConfig = {
+const DEFAULT_CONFIG = {
   similarityThreshold: 0.7,
   maxItems: 1000,
 };
@@ -32,27 +39,70 @@ export class DeduplicationTracker {
   private documented: Map<string, DocumentedItem> = new Map();
   private invalidated: Map<string, InvalidatedEvent> = new Map();
   private titleIndex: Map<string, string[]> = new Map(); // normalized title -> hashes
-  private config: DeduplicationConfig;
+  private config: typeof DEFAULT_CONFIG;
+  private db?: DatabaseManager;
+  private sessionId?: string;
 
-  constructor(config: Partial<DeduplicationConfig> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+  constructor(config: DeduplicationConfig = {}) {
+    this.config = {
+      similarityThreshold: config.similarityThreshold ?? DEFAULT_CONFIG.similarityThreshold,
+      maxItems: config.maxItems ?? DEFAULT_CONFIG.maxItems,
+    };
+    this.db = config.db;
+    this.sessionId = config.sessionId;
+
+    // Load existing hashes from DB if available
+    if (this.db && this.sessionId) {
+      this.loadFromDatabase();
+    }
+  }
+
+  /**
+   * Load existing hashes from database into memory for fast lookups
+   */
+  private loadFromDatabase(): void {
+    if (!this.db || !this.sessionId) return;
+
+    const hashes = this.db.getSessionDedupHashes(this.sessionId);
+    for (const { hash } of hashes) {
+      // We only need to track that the hash exists for duplicate detection
+      // The full event details are in the events table
+      this.documented.set(hash, {
+        hash,
+        title: '', // Not needed for duplicate check
+        eventType: 'user_request' as EventType, // Placeholder
+        timestamp: new Date(),
+      });
+    }
   }
 
   /**
    * Generate a hash for an event based on key content
+   * IMPORTANT: Evidence field is the PRIMARY deduplication key when available,
+   * as it contains the actual user quote which doesn't vary like AI-generated content.
    */
   hash(event: {
     eventType: string;
     title: string;
     description: string;
+    evidence?: string;
   }): string {
-    // Normalize and create semantic hash
+    // If evidence exists, use it as the PRIMARY key (with eventType)
+    // This prevents duplicates when Claude generates different titles for the same user quote
+    if (event.evidence && event.evidence.trim().length > 0) {
+      const normalized = [
+        event.eventType,
+        this.normalizeText(event.evidence.slice(0, 300)),
+      ].join(':');
+      return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+    }
+
+    // Fallback to title + description when no evidence available
     const normalized = [
       event.eventType,
       this.normalizeText(event.title),
       this.normalizeText(event.description.slice(0, 200)),
     ].join(':');
-
     return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
   }
 
@@ -65,8 +115,9 @@ export class DeduplicationTracker {
 
   /**
    * Check if a similar event has been documented
+   * Now properly compares evidence fields when available for more accurate matching
    */
-  isSimilar(event: { title: string; description: string }): boolean {
+  isSimilar(event: { title: string; description: string; evidence?: string }): boolean {
     const normalizedTitle = this.normalizeText(event.title);
     const words = normalizedTitle.split(/\s+/);
 
@@ -76,11 +127,23 @@ export class DeduplicationTracker {
       for (const existingHash of hashes) {
         const existing = this.documented.get(existingHash);
         if (existing) {
-          const similarity = this.calculateSimilarity(
-            event.title + ' ' + event.description,
+          // If both have evidence, compare evidence directly (most reliable)
+          if (event.evidence && existing.evidence) {
+            const evidenceSimilarity = this.calculateSimilarity(
+              event.evidence,
+              existing.evidence
+            );
+            if (evidenceSimilarity > this.config.similarityThreshold) {
+              return true;
+            }
+          }
+
+          // Also check title similarity (symmetric comparison)
+          const titleSimilarity = this.calculateSimilarity(
+            event.title,
             existing.title
           );
-          if (similarity > this.config.similarityThreshold) {
+          if (titleSimilarity > this.config.similarityThreshold) {
             return true;
           }
         }
@@ -92,10 +155,12 @@ export class DeduplicationTracker {
 
   /**
    * Mark an event as documented
+   * @param eventId - Optional database event ID for linking dedup hash to event
    */
   markDocumented(
     hash: string,
-    event: { title: string; eventType: string }
+    event: { title: string; eventType: string; evidence?: string },
+    eventId?: number
   ): void {
     // Evict oldest if at capacity
     if (this.documented.size >= this.config.maxItems) {
@@ -111,10 +176,16 @@ export class DeduplicationTracker {
       title: event.title,
       eventType: event.eventType as EventType,
       timestamp: new Date(),
+      evidence: event.evidence,
     };
 
     this.documented.set(hash, item);
     this.addToIndex(hash, event.title);
+
+    // Write to DB if available
+    if (this.db && this.sessionId) {
+      this.db.insertDedupHash(hash, this.sessionId, eventId);
+    }
   }
 
   /**

@@ -8,12 +8,16 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import type { StreamMessage, DocumentationEvent, EventType, ConfidenceLevel } from '../types/index.js';
-import { EVENT_CONFIDENCE } from '../types/index.js';
+import { EVENT_CONFIDENCE, generateMessageId } from '../types/index.js';
 import { HierarchicalContextManager } from '../context/index.js';
 import { SignificanceDetector } from './significance-detector.js';
 import { DeduplicationTracker } from './deduplication.js';
+import { AnalyzedMessageTracker } from './analyzed-tracker.js';
 import { FileManager } from '../output/file-manager.js';
 import { MarkdownFormatter } from '../output/markdown-formatter.js';
+import type { DatabaseManager } from '../database/db-manager.js';
+import { SessionMarkdownDebouncer } from '../output/session-markdown-debouncer.js';
+import { generateSessionMarkdown } from '../output/session-markdown-generator.js';
 
 const DOCUMENTATION_SYSTEM_PROMPT = `You are a documentation agent observing a coding session. Your role is to create COMPREHENSIVE documentation that preserves the valuable details from the conversation.
 
@@ -166,6 +170,8 @@ export interface DocAgentConfig {
   outputDir: string;
   sessionId: string;
   verbose?: boolean;
+  /** Optional database for persistence (replaces JSON state files) */
+  db?: DatabaseManager;
 }
 
 export class DocumentationAgent {
@@ -173,6 +179,7 @@ export class DocumentationAgent {
   private contextManager: HierarchicalContextManager;
   private detector: SignificanceDetector;
   private dedup: DeduplicationTracker;
+  private analyzedTracker: AnalyzedMessageTracker;
   private fileManager: FileManager;
   private formatter: MarkdownFormatter;
   private processing: boolean = false;
@@ -181,12 +188,37 @@ export class DocumentationAgent {
   private sessionSubjectSet: boolean = false;
   private initialized: boolean = false;
   private restoredTranscriptPosition: { path: string; position: number } | null = null;
+  private db?: DatabaseManager;
+  private markdownDebouncer?: SessionMarkdownDebouncer;
 
   constructor(private config: DocAgentConfig) {
     this.client = new Anthropic({ apiKey: config.apiKey });
     this.contextManager = new HierarchicalContextManager();
     this.detector = new SignificanceDetector();
-    this.dedup = new DeduplicationTracker();
+    this.db = config.db;
+
+    // Initialize trackers with DB backing if provided
+    if (this.db) {
+      this.dedup = new DeduplicationTracker({
+        db: this.db,
+        sessionId: config.sessionId,
+      });
+      this.analyzedTracker = new AnalyzedMessageTracker({
+        db: this.db,
+        sessionId: config.sessionId,
+      });
+
+      // Create debouncer for batched session.md updates
+      this.markdownDebouncer = new SessionMarkdownDebouncer(
+        () => this.regenerateSessionMarkdown(),
+        { eventThreshold: 3, timeThresholdMs: 2 * 60 * 1000 }
+      );
+    } else {
+      // Legacy: in-memory trackers without DB
+      this.dedup = new DeduplicationTracker();
+      this.analyzedTracker = new AnalyzedMessageTracker();
+    }
+
     this.fileManager = new FileManager(config.outputDir, config.sessionId);
     this.formatter = new MarkdownFormatter();
     this.verbose = config.verbose ?? false;
@@ -200,7 +232,23 @@ export class DocumentationAgent {
     if (this.initialized) return;
     this.initialized = true;
 
-    // Check if there's an existing directory for this session
+    // When using DB, trackers already load their state in constructors
+    // We only need to handle legacy file-based state here
+    if (this.db) {
+      // Check for existing session directory (for file output purposes)
+      const foundExisting = await this.fileManager.findExistingSessionDir();
+      if (foundExisting) {
+        this.sessionSubjectSet = this.fileManager.isSubjectLocked();
+        if (this.verbose) {
+          console.error(`[doc-agent] Reusing existing session directory: ${this.fileManager.getSessionDir()}`);
+          console.error(`[doc-agent] Dedup entries loaded from DB: ${this.dedup.getCount()}`);
+          console.error(`[doc-agent] Analyzed messages loaded from DB: ${this.analyzedTracker.getCount()}`);
+        }
+      }
+      return;
+    }
+
+    // Legacy: Load state from JSON files when not using DB
     const foundExisting = await this.fileManager.findExistingSessionDir();
     if (foundExisting) {
       // Subject is already set from the existing directory
@@ -235,6 +283,15 @@ export class DocumentationAgent {
           console.error(`[doc-agent] Loaded transcript position: ${transcriptPos.position} bytes`);
         }
       }
+
+      // Load persisted analyzed message state to prevent re-analysis
+      const analyzedState = await this.fileManager.loadAnalyzedState();
+      if (analyzedState) {
+        this.analyzedTracker.import(analyzedState);
+        if (this.verbose) {
+          console.error(`[doc-agent] Loaded ${analyzedState.length} analyzed message entries`);
+        }
+      }
     }
   }
 
@@ -254,9 +311,16 @@ export class DocumentationAgent {
     await this.ensureInitialized();
 
     try {
+      // Generate IDs and summaries for messages (for analyzed-message tracking)
+      const messageData = messages.map((m) => ({
+        message: m,
+        id: generateMessageId(m),
+        summary: AnalyzedMessageTracker.generateBriefSummary(m),
+      }));
+
       // Add messages to context manager
-      for (const msg of messages) {
-        this.contextManager.addMessage(msg);
+      for (const { message } of messageData) {
+        this.contextManager.addMessage(message);
       }
 
       // Check if any messages are potentially significant
@@ -279,18 +343,36 @@ export class DocumentationAgent {
         return;
       }
 
-      // Get current context
-      const context = this.contextManager.getContext();
+      // Get current context with analyzed-message filtering
+      // This ensures Claude only sees each message's full content once
+      const context = this.contextManager.getContext({
+        analyzedMessageIds: this.analyzedTracker.getAnalyzedIds(),
+        analyzedSummaries: this.analyzedTracker.getAnalyzedSummaries(),
+      });
 
-      // Get list of already documented items
+      // Get list of already documented items - include evidence to help Claude
+      // recognize duplicates even when it generates different titles
       const documented = this.dedup.getDocumented();
       const documentedList =
         documented.length > 0
-          ? `\n\nAlready documented (do not repeat):\n${documented.map((d) => `- ${d.title}`).join('\n')}`
+          ? `\n\nAlready documented (do not repeat - if evidence matches, it's a duplicate):\n${documented.map((d) => {
+              const evidenceHint = d.evidence ? ` (evidence: "${d.evidence.slice(0, 100)}...")` : '';
+              return `- [${d.eventType}] ${d.title}${evidenceHint}`;
+            }).join('\n')}`
           : '';
 
       // Query the documentation agent
       const events = await this.queryAgent(context + documentedList);
+
+      // Mark ALL batch messages as analyzed AFTER successful query
+      // This ensures Claude won't re-analyze the same content in future batches
+      for (const { id, summary } of messageData) {
+        this.analyzedTracker.markAnalyzed(id, summary);
+      }
+
+      if (this.verbose && messageData.length > 0) {
+        console.error(`[doc-agent] Marked ${messageData.length} messages as analyzed`);
+      }
 
       // Process each event
       for (const event of events) {
@@ -304,9 +386,17 @@ export class DocumentationAgent {
 
       // Update running session summary after each significant batch
       if (events.length > 0) {
-        await this.updateRunningSummary();
-        // Persist dedup state to prevent re-documenting on restart
-        await this.saveDedupState();
+        // Skip running summary when using DB (session.md is regenerated from DB)
+        if (!this.db) {
+          await this.updateRunningSummary();
+          // Persist dedup state to prevent re-documenting on restart (legacy)
+          await this.saveDedupState();
+        }
+      }
+
+      // Save analyzed state (legacy file-based only, DB auto-persists)
+      if (!this.db) {
+        await this.saveAnalyzedState();
       }
     } catch (error) {
       if (this.verbose) {
@@ -379,6 +469,26 @@ ${context}`,
     } catch (error) {
       if (this.verbose) {
         console.error('[doc-agent] Error updating running summary:', error);
+      }
+    }
+  }
+
+  /**
+   * Regenerate session.md from database
+   * Called by the debouncer when threshold is reached
+   */
+  private async regenerateSessionMarkdown(): Promise<void> {
+    if (!this.db) return;
+
+    try {
+      const markdown = generateSessionMarkdown(this.db, this.config.sessionId);
+      await this.fileManager.writeSessionMarkdown(markdown);
+      if (this.verbose) {
+        console.error('[doc-agent] Regenerated session.md from database');
+      }
+    } catch (error) {
+      if (this.verbose) {
+        console.error('[doc-agent] Error regenerating session.md:', error);
       }
     }
   }
@@ -570,11 +680,12 @@ ${preparedContext}`,
   private async documentEvent(
     event: Omit<DocumentationEvent, 'timestamp' | 'sessionId' | 'confidence'> & { confidence?: ConfidenceLevel }
   ): Promise<void> {
-    // Check for duplicates
+    // Check for duplicates - include evidence as it's the most stable identifier
     const hash = this.dedup.hash({
       eventType: event.eventType,
       title: event.title,
       description: event.description,
+      evidence: event.evidence,
     });
 
     if (this.dedup.isDuplicate(hash)) {
@@ -584,8 +695,8 @@ ${preparedContext}`,
       return;
     }
 
-    // Check for similar events
-    if (this.dedup.isSimilar({ title: event.title, description: event.description })) {
+    // Check for similar events - include evidence for better similarity detection
+    if (this.dedup.isSimilar({ title: event.title, description: event.description, evidence: event.evidence })) {
       if (this.verbose) {
         console.error(`[doc-agent] Skipping similar: ${event.title}`);
       }
@@ -600,33 +711,65 @@ ${preparedContext}`,
     // Determine confidence level (use provided value or derive from event type)
     const confidence: ConfidenceLevel = event.confidence || EVENT_CONFIDENCE[event.eventType] || 'unconfirmed';
 
-    // Create full event
-    const fullEvent: DocumentationEvent = {
-      ...event,
-      confidence,
-      timestamp: new Date(),
-      sessionId: this.config.sessionId,
-    };
+    // Use database when available, otherwise fall back to file-based storage
+    if (this.db) {
+      // Insert event into database with dedup hash (atomic)
+      const dbEvent = this.db.insertEventWithHash({
+        sessionId: this.config.sessionId,
+        eventType: event.eventType,
+        title: event.title,
+        description: event.description,
+        confidence,
+        evidence: event.evidence,
+        context: event.context,
+        reasoning: event.reasoning,
+        relatedFiles: event.relatedFiles,
+        tags: event.tags,
+      }, hash);
 
-    // Format and write
-    const markdown = this.formatter.formatEvent(fullEvent);
-    const eventPath = await this.fileManager.writeEvent(event.eventType, markdown);
+      // Mark as documented in memory (already persisted to DB by insertEventWithHash)
+      this.dedup.markDocumented(hash, {
+        title: event.title,
+        eventType: event.eventType,
+        evidence: event.evidence,
+      }, dbEvent.id);
 
-    // Add brief entry to session document
-    const brief = this.formatter.formatEventBrief(
-      fullEvent,
-      `./events/${eventPath.split('/').pop()}`
-    );
-    await this.fileManager.appendToSession(brief);
+      // Schedule session.md regeneration
+      this.markdownDebouncer?.recordEvent();
 
-    // Mark as documented
-    this.dedup.markDocumented(hash, {
-      title: event.title,
-      eventType: event.eventType,
-    });
+      if (this.verbose) {
+        console.error(`[doc-agent] Documented to DB: ${event.title} (event #${dbEvent.id})`);
+      }
+    } else {
+      // Legacy file-based storage
+      const fullEvent: DocumentationEvent = {
+        ...event,
+        confidence,
+        timestamp: new Date(),
+        sessionId: this.config.sessionId,
+      };
 
-    if (this.verbose) {
-      console.error(`[doc-agent] Documented: ${event.title}`);
+      // Format and write
+      const markdown = this.formatter.formatEvent(fullEvent);
+      const eventPath = await this.fileManager.writeEvent(event.eventType, markdown);
+
+      // Add brief entry to session document
+      const brief = this.formatter.formatEventBrief(
+        fullEvent,
+        `./events/${eventPath.split('/').pop()}`
+      );
+      await this.fileManager.appendToSession(brief);
+
+      // Mark as documented - include evidence for similarity comparison
+      this.dedup.markDocumented(hash, {
+        title: event.title,
+        eventType: event.eventType,
+        evidence: event.evidence,
+      });
+
+      if (this.verbose) {
+        console.error(`[doc-agent] Documented: ${event.title}`);
+      }
     }
   }
 
@@ -702,58 +845,93 @@ Return ONLY the subject, nothing else. No quotes, no explanation.`,
     const invalidated = this.dedup.invalidateMatching(invalidatesText, reason);
 
     if (invalidated.length > 0) {
-      // Mark the invalidated events in the file system
-      for (const inv of invalidated) {
-        await this.fileManager.markEventInvalidated(inv.originalTitle, reason);
-      }
-
       if (this.verbose) {
         console.error(`[doc-agent] Invalidated ${invalidated.length} event(s)`);
         for (const inv of invalidated) {
           console.error(`[doc-agent]   - ${inv.originalTitle}`);
         }
       }
+
+      // When using DB, events are invalidated via the dedup tracker which writes to DB
+      // For legacy mode, also mark in file system
+      if (!this.db) {
+        for (const inv of invalidated) {
+          await this.fileManager.markEventInvalidated(inv.originalTitle, reason);
+        }
+      }
     }
 
-    // Document the correction itself (with the correct information)
-    const correctionEvent: DocumentationEvent = {
-      eventType: 'correction' as const,
-      title: event.title,
-      description: event.correctInfo || event.description,
-      confidence: 'confirmed' as ConfidenceLevel,  // Corrections are always confirmed
-      context: event.context,
-      evidence: event.evidence,
-      reasoning: `**What was wrong:** ${invalidatesText}\n\n**Why it was wrong:** ${reason}\n\n**Correct information:** ${event.correctInfo || event.description}`,
-      relatedFiles: event.relatedFiles,
-      tags: [...(event.tags || []), 'correction'],
-      timestamp: new Date(),
-      sessionId: this.config.sessionId,
-    };
-
-    // Format and write the correction
-    const markdown = this.formatter.formatEvent(correctionEvent);
-    const eventPath = await this.fileManager.writeEvent('correction', markdown);
-
-    // Add brief entry to session document
-    const brief = this.formatter.formatEventBrief(
-      correctionEvent,
-      `./events/${eventPath.split('/').pop()}`
-    );
-    await this.fileManager.appendToSession(brief);
-
-    // Mark the correction as documented
+    // Generate hash for dedup check
     const hash = this.dedup.hash({
       eventType: 'correction',
       title: event.title,
       description: event.description,
-    });
-    this.dedup.markDocumented(hash, {
-      title: event.title,
-      eventType: 'correction',
+      evidence: event.evidence,
     });
 
-    if (this.verbose) {
-      console.error(`[doc-agent] Recorded correction: ${event.title}`);
+    // Use database when available
+    if (this.db) {
+      // Insert correction event into database
+      const dbEvent = this.db.insertEventWithHash({
+        sessionId: this.config.sessionId,
+        eventType: 'correction',
+        title: event.title,
+        description: event.correctInfo || event.description,
+        confidence: 'confirmed',
+        evidence: event.evidence,
+        context: event.context,
+        reasoning: `**What was wrong:** ${invalidatesText}\n\n**Why it was wrong:** ${reason}\n\n**Correct information:** ${event.correctInfo || event.description}`,
+        relatedFiles: event.relatedFiles,
+        tags: [...(event.tags || []), 'correction'],
+      }, hash);
+
+      // Mark as documented in memory
+      this.dedup.markDocumented(hash, {
+        title: event.title,
+        eventType: 'correction',
+        evidence: event.evidence,
+      }, dbEvent.id);
+
+      // Schedule session.md regeneration
+      this.markdownDebouncer?.recordEvent();
+
+      if (this.verbose) {
+        console.error(`[doc-agent] Recorded correction to DB: ${event.title} (event #${dbEvent.id})`);
+      }
+    } else {
+      // Legacy file-based storage
+      const correctionEvent: DocumentationEvent = {
+        eventType: 'correction' as const,
+        title: event.title,
+        description: event.correctInfo || event.description,
+        confidence: 'confirmed' as ConfidenceLevel,
+        context: event.context,
+        evidence: event.evidence,
+        reasoning: `**What was wrong:** ${invalidatesText}\n\n**Why it was wrong:** ${reason}\n\n**Correct information:** ${event.correctInfo || event.description}`,
+        relatedFiles: event.relatedFiles,
+        tags: [...(event.tags || []), 'correction'],
+        timestamp: new Date(),
+        sessionId: this.config.sessionId,
+      };
+
+      const markdown = this.formatter.formatEvent(correctionEvent);
+      const eventPath = await this.fileManager.writeEvent('correction', markdown);
+
+      const brief = this.formatter.formatEventBrief(
+        correctionEvent,
+        `./events/${eventPath.split('/').pop()}`
+      );
+      await this.fileManager.appendToSession(brief);
+
+      this.dedup.markDocumented(hash, {
+        title: event.title,
+        eventType: 'correction',
+        evidence: event.evidence,
+      });
+
+      if (this.verbose) {
+        console.error(`[doc-agent] Recorded correction: ${event.title}`);
+      }
     }
   }
 
@@ -771,9 +949,27 @@ Return ONLY the subject, nothing else. No quotes, no explanation.`,
         if (this.verbose) {
           console.error('[doc-agent] Skipping finalization - no content to document');
         }
+        // Clean up debouncer even if no content
+        this.markdownDebouncer?.destroy();
         return;
       }
 
+      // When using DB, force final session.md regeneration
+      if (this.db) {
+        await this.markdownDebouncer?.forceUpdate();
+        this.markdownDebouncer?.destroy();
+
+        // Finalize session in database
+        this.db.finalizeSession(this.config.sessionId);
+
+        if (this.verbose) {
+          console.error('[doc-agent] Session finalized in database');
+          console.error(`[doc-agent] Total events documented: ${documentedCount}`);
+        }
+        return;
+      }
+
+      // Legacy file-based finalization
       const finalContext = this.contextManager.getFinalSummary();
 
       // If no subject was set yet, try to generate one from the context
@@ -872,6 +1068,20 @@ Return ONLY the subject, nothing else.`,
     } catch (error) {
       if (this.verbose) {
         console.error('[doc-agent] Error saving dedup state:', error);
+      }
+    }
+  }
+
+  /**
+   * Save analyzed message state to disk for session resumption
+   */
+  private async saveAnalyzedState(): Promise<void> {
+    try {
+      const items = this.analyzedTracker.export();
+      await this.fileManager.saveAnalyzedState(items);
+    } catch (error) {
+      if (this.verbose) {
+        console.error('[doc-agent] Error saving analyzed state:', error);
       }
     }
   }

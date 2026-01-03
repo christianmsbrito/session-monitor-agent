@@ -5,11 +5,13 @@
  * file to process new messages.
  */
 
+import * as path from 'path';
 import type { Config } from '../types/index.js';
 import { SocketServer, type HookEvent } from '../server/socket-server.js';
 import { TranscriptReader } from '../server/transcript-reader.js';
 import { MessageRouter } from '../interceptor/index.js';
 import { DocumentationAgent } from '../documentation/index.js';
+import { initializeDatabase, closeDatabase, type DatabaseManager } from '../database/index.js';
 
 export interface WatcherConfig extends Config {
   /** Custom socket path (optional) */
@@ -51,6 +53,7 @@ export class SessionWatcher {
   private verbose: boolean;
   private messageCount: number = 0;
   private hookCount: number = 0;
+  private db?: DatabaseManager;
 
   constructor(private config: WatcherConfig) {
     this.monitorSessionId = this.generateSessionId();
@@ -109,13 +112,33 @@ export class SessionWatcher {
       flushIntervalMs: this.config.flushIntervalMs,
     });
 
-    // Create per-session doc agent
+    // Create session record in database if available
+    if (this.db) {
+      try {
+        // Check if session already exists (resuming)
+        const existing = this.db.getSession(sessionId);
+        if (!existing) {
+          this.db.createSession({
+            id: sessionId,
+            shortId: sessionId.slice(0, 8),
+            transcriptPath,
+          });
+        }
+      } catch (error) {
+        if (this.verbose) {
+          console.error(`[watcher] Warning: Could not create session in DB: ${error}`);
+        }
+      }
+    }
+
+    // Create per-session doc agent with database backing
     const docAgent = new DocumentationAgent({
       apiKey: this.config.apiKey,
       model: this.config.docModel,
       outputDir: this.config.outputDir,
       sessionId: sessionId,
       verbose: this.config.verbose,
+      db: this.db, // Pass database for persistence
     });
 
     // Wire this session's router to its doc agent
@@ -369,6 +392,17 @@ export class SessionWatcher {
    * Start the watcher
    */
   async start(): Promise<void> {
+    // Initialize database for persistence
+    const dbPath = path.join(this.config.outputDir, 'sessions.db');
+    try {
+      this.db = initializeDatabase(dbPath);
+      console.error(`[session-monitor] Database initialized: ${dbPath}`);
+    } catch (error) {
+      console.error(`[session-monitor] Warning: Could not initialize database: ${error}`);
+      console.error(`[session-monitor] Falling back to file-based storage`);
+      // Continue without DB - doc agents will use file-based persistence
+    }
+
     console.error(`[session-monitor] Starting hook-based session monitor`);
     console.error(`[session-monitor] Monitor ID: ${this.monitorSessionId}`);
     console.error(`[session-monitor] Output: ${this.config.outputDir}`);
@@ -420,6 +454,9 @@ export class SessionWatcher {
     console.error(`[session-monitor] Hooks received: ${this.hookCount}`);
     console.error(`[session-monitor] Messages processed: ${this.messageCount}`);
     console.error(`[session-monitor] Total events documented: ${totalDocumented}`);
+
+    // Close database connection
+    closeDatabase();
 
     process.exit(0);
   }

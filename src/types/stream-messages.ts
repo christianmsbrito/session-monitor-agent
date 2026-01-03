@@ -3,6 +3,8 @@
  * Based on --output-format stream-json output
  */
 
+import crypto from 'crypto';
+
 export interface TextContent {
   type: 'text';
   text: string;
@@ -140,4 +142,30 @@ export function getToolUses(msg: AssistantMessage): ToolUseContent[] {
   return msg.message.content.filter(
     (c): c is ToolUseContent => c.type === 'tool_use'
   );
+}
+
+/**
+ * Generate a deterministic message ID via content hashing.
+ * Used to track which messages have been analyzed to prevent re-analysis.
+ */
+export function generateMessageId(message: StreamMessage): string {
+  let contentForHash: Record<string, unknown>;
+
+  if (message.type === 'user' || message.type === 'assistant') {
+    contentForHash = {
+      type: message.type,
+      content: message.message.content,
+    };
+  } else if (message.type === 'system') {
+    contentForHash = {
+      type: message.type,
+      subtype: message.subtype,
+      session_id: message.session_id,
+    };
+  } else {
+    contentForHash = { type: (message as StreamMessage).type };
+  }
+
+  const jsonStr = JSON.stringify(contentForHash);
+  return crypto.createHash('sha256').update(jsonStr).digest('hex').slice(0, 16);
 }

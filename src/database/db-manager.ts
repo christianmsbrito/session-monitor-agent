@@ -18,6 +18,50 @@ export interface CreateSessionInput {
   transcriptPath?: string;
 }
 
+export interface EventRow {
+  id: number;
+  sessionId: string;
+  eventType: string;
+  title: string;
+  description: string | null;
+  confidence: string;
+  evidence: string | null;
+  context: string | null;
+  reasoning: string | null;
+  relatedFiles: string[] | null;
+  tags: string[] | null;
+  createdAt: Date;
+  invalidatedAt: Date | null;
+  invalidationReason: string | null;
+}
+
+export interface InsertEventInput {
+  sessionId: string;
+  eventType: string;
+  title: string;
+  description?: string;
+  confidence: string;
+  evidence?: string;
+  context?: string;
+  reasoning?: string;
+  relatedFiles?: string[];
+  tags?: string[];
+}
+
+export interface DedupHashRow {
+  hash: string;
+  sessionId: string;
+  eventId: number | null;
+  createdAt: Date;
+}
+
+export interface AnalyzedMessageRow {
+  id: string;
+  sessionId: string;
+  briefSummary: string | null;
+  analyzedAt: Date;
+}
+
 export class DatabaseManager {
   private db: Database.Database;
   private dbPath: string;
@@ -146,6 +190,145 @@ export class DatabaseManager {
       transcriptPosition: row.transcript_position,
       status: row.status,
     };
+  }
+
+  // Event CRUD methods
+
+  insertEvent(input: InsertEventInput): EventRow {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(`
+      INSERT INTO events (session_id, event_type, title, description, confidence, evidence, context, reasoning, related_files, tags, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.sessionId,
+      input.eventType,
+      input.title,
+      input.description ?? null,
+      input.confidence,
+      input.evidence ?? null,
+      input.context ?? null,
+      input.reasoning ?? null,
+      input.relatedFiles ? JSON.stringify(input.relatedFiles) : null,
+      input.tags ? JSON.stringify(input.tags) : null,
+      now
+    );
+
+    return this.getEvent(result.lastInsertRowid as number)!;
+  }
+
+  getEvent(id: number): EventRow | null {
+    const row = this.db.prepare('SELECT * FROM events WHERE id = ?').get(id) as any;
+    return row ? this.mapEventRow(row) : null;
+  }
+
+  getSessionEvents(sessionId: string, options?: { includeInvalidated?: boolean }): EventRow[] {
+    let query = 'SELECT * FROM events WHERE session_id = ?';
+    if (!options?.includeInvalidated) {
+      query += ' AND invalidated_at IS NULL';
+    }
+    query += ' ORDER BY created_at ASC';
+
+    const rows = this.db.prepare(query).all(sessionId) as any[];
+    return rows.map(row => this.mapEventRow(row));
+  }
+
+  getEventCount(sessionId: string): number {
+    const result = this.db.prepare(
+      'SELECT COUNT(*) as count FROM events WHERE session_id = ? AND invalidated_at IS NULL'
+    ).get(sessionId) as { count: number };
+    return result.count;
+  }
+
+  invalidateEvent(eventId: number, reason: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare('UPDATE events SET invalidated_at = ?, invalidation_reason = ? WHERE id = ?')
+      .run(now, reason, eventId);
+  }
+
+  private mapEventRow(row: any): EventRow {
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      eventType: row.event_type,
+      title: row.title,
+      description: row.description,
+      confidence: row.confidence,
+      evidence: row.evidence,
+      context: row.context,
+      reasoning: row.reasoning,
+      relatedFiles: row.related_files ? JSON.parse(row.related_files) : null,
+      tags: row.tags ? JSON.parse(row.tags) : null,
+      createdAt: new Date(row.created_at),
+      invalidatedAt: row.invalidated_at ? new Date(row.invalidated_at) : null,
+      invalidationReason: row.invalidation_reason,
+    };
+  }
+
+  // Dedup hash methods
+
+  insertDedupHash(hash: string, sessionId: string, eventId?: number): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO dedup_hashes (hash, session_id, event_id, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(hash, sessionId, eventId ?? null, now);
+  }
+
+  hashExists(hash: string): boolean {
+    const result = this.db.prepare('SELECT 1 FROM dedup_hashes WHERE hash = ?').get(hash);
+    return result !== undefined;
+  }
+
+  getSessionDedupHashes(sessionId: string): DedupHashRow[] {
+    const rows = this.db.prepare('SELECT * FROM dedup_hashes WHERE session_id = ?').all(sessionId) as any[];
+    return rows.map(row => ({
+      hash: row.hash,
+      sessionId: row.session_id,
+      eventId: row.event_id,
+      createdAt: new Date(row.created_at),
+    }));
+  }
+
+  // Analyzed messages methods
+
+  markMessageAnalyzed(messageId: string, sessionId: string, briefSummary?: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO analyzed_messages (id, session_id, brief_summary, analyzed_at)
+      VALUES (?, ?, ?, ?)
+    `).run(messageId, sessionId, briefSummary ?? null, now);
+  }
+
+  isMessageAnalyzed(messageId: string): boolean {
+    const result = this.db.prepare('SELECT 1 FROM analyzed_messages WHERE id = ?').get(messageId);
+    return result !== undefined;
+  }
+
+  getSessionAnalyzedMessages(sessionId: string): AnalyzedMessageRow[] {
+    const rows = this.db.prepare('SELECT * FROM analyzed_messages WHERE session_id = ?').all(sessionId) as any[];
+    return rows.map(row => ({
+      id: row.id,
+      sessionId: row.session_id,
+      briefSummary: row.brief_summary,
+      analyzedAt: new Date(row.analyzed_at),
+    }));
+  }
+
+  getAnalyzedMessageIds(sessionId: string): Set<string> {
+    const rows = this.db.prepare('SELECT id FROM analyzed_messages WHERE session_id = ?').all(sessionId) as { id: string }[];
+    return new Set(rows.map(r => r.id));
+  }
+
+  // Transaction methods
+
+  insertEventWithHash(input: InsertEventInput, hash: string): EventRow {
+    const insertTransaction = this.db.transaction(() => {
+      const event = this.insertEvent(input);
+      this.insertDedupHash(hash, input.sessionId, event.id);
+      return event;
+    });
+
+    return insertTransaction();
   }
 
   close(): void {
