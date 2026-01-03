@@ -25,10 +25,12 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "better-sqlite3": "^12.5.0",
     "commander": "^12.1.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.1",
     "eslint": "^9.16.0",
     "typescript": "^5.7.2",
