@@ -104,15 +104,6 @@ const SIGNIFICANCE_PATTERNS = {
 } as const;
 
 /**
- * High-priority categories that should always be captured
- */
-const HIGH_PRIORITY_CATEGORIES: SignificanceCategory[] = [
-  'userRequest',
-  'userConfirmation',
-  'modelConclusion',
-];
-
-/**
  * Tool result patterns that indicate significance
  */
 const TOOL_RESULT_PATTERNS = {

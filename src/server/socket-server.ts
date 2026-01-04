@@ -150,27 +150,3 @@ export class SocketServer extends EventEmitter {
   }
 }
 
-/**
- * Send an event to the socket server (used by hook scripts)
- */
-export async function sendHookEvent(
-  event: HookEvent,
-  socketPath: string = DEFAULT_SOCKET_PATH
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const client = net.createConnection(socketPath, () => {
-      client.write(JSON.stringify(event) + '\n');
-      client.end();
-    });
-
-    client.on('error', reject);
-    client.on('close', () => resolve());
-  });
-}
-
-/**
- * Get the default socket path
- */
-export function getDefaultSocketPath(): string {
-  return DEFAULT_SOCKET_PATH;
-}

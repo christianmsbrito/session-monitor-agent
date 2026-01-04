@@ -113,7 +113,6 @@ describe('SessionWatcher - Multi-Session Support', () => {
   };
 
   let watcher: SessionWatcher;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockSocketServer: any;
 
   beforeEach(() => {
@@ -325,7 +324,7 @@ describe('SessionWatcher - Multi-Session Support', () => {
       });
 
       // Try to send more events to the finalized session
-      const mockReader = MockedTranscriptReader.mock.results[0]?.value;
+      const _mockReader = MockedTranscriptReader.mock.results[0]?.value;
 
       mockSocketServer._emitter.emit('hook', createHookEvent('PostToolUse', 'post-end-test'));
 
@@ -436,7 +435,7 @@ describe('SessionWatcher - Multi-Session Support', () => {
   describe('Edge Cases', () => {
     it('should handle missing transcript path gracefully', async () => {
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      const verboseWatcher = new SessionWatcher({ ...defaultConfig, verbose: true });
+      const _verboseWatcher = new SessionWatcher({ ...defaultConfig, verbose: true });
       const verboseMockServer = MockedSocketServer.mock.results[MockedSocketServer.mock.results.length - 1]?.value;
 
       // Event without transcript path

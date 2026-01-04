@@ -1,5 +1,48 @@
 import Database from 'better-sqlite3';
 
+// Raw database row types (snake_case columns from SQLite)
+interface RawSessionRow {
+  id: string;
+  short_id: string;
+  subject: string | null;
+  started_at: string;
+  ended_at: string | null;
+  transcript_path: string | null;
+  transcript_position: number;
+  status: string;
+}
+
+interface RawEventRow {
+  id: number;
+  session_id: string;
+  event_type: string;
+  title: string;
+  description: string | null;
+  confidence: string;
+  evidence: string | null;
+  context: string | null;
+  reasoning: string | null;
+  related_files: string | null;
+  tags: string | null;
+  created_at: string;
+  invalidated_at: string | null;
+  invalidation_reason: string | null;
+}
+
+interface RawDedupHashRow {
+  hash: string;
+  session_id: string;
+  event_id: number | null;
+  created_at: string;
+}
+
+interface RawAnalyzedMessageRow {
+  id: string;
+  session_id: string;
+  brief_summary: string | null;
+  analyzed_at: string;
+}
+
 export interface SessionRow {
   id: string;
   shortId: string;
@@ -155,7 +198,7 @@ export class DatabaseManager {
   }
 
   getSession(id: string): SessionRow | null {
-    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as any;
+    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as RawSessionRow | undefined;
     return row ? this.mapSessionRow(row) : null;
   }
 
@@ -175,11 +218,11 @@ export class DatabaseManager {
 
   findSessionByShortId(shortId: string): SessionRow | null {
     const row = this.db.prepare('SELECT * FROM sessions WHERE short_id = ? AND status = ?')
-      .get(shortId, 'active') as any;
+      .get(shortId, 'active') as RawSessionRow | undefined;
     return row ? this.mapSessionRow(row) : null;
   }
 
-  private mapSessionRow(row: any): SessionRow {
+  private mapSessionRow(row: RawSessionRow): SessionRow {
     return {
       id: row.id,
       shortId: row.short_id,
@@ -217,7 +260,7 @@ export class DatabaseManager {
   }
 
   getEvent(id: number): EventRow | null {
-    const row = this.db.prepare('SELECT * FROM events WHERE id = ?').get(id) as any;
+    const row = this.db.prepare('SELECT * FROM events WHERE id = ?').get(id) as RawEventRow | undefined;
     return row ? this.mapEventRow(row) : null;
   }
 
@@ -228,7 +271,7 @@ export class DatabaseManager {
     }
     query += ' ORDER BY created_at ASC';
 
-    const rows = this.db.prepare(query).all(sessionId) as any[];
+    const rows = this.db.prepare(query).all(sessionId) as RawEventRow[];
     return rows.map(row => this.mapEventRow(row));
   }
 
@@ -245,7 +288,7 @@ export class DatabaseManager {
       .run(now, reason, eventId);
   }
 
-  private mapEventRow(row: any): EventRow {
+  private mapEventRow(row: RawEventRow): EventRow {
     return {
       id: row.id,
       sessionId: row.session_id,
@@ -280,7 +323,7 @@ export class DatabaseManager {
   }
 
   getSessionDedupHashes(sessionId: string): DedupHashRow[] {
-    const rows = this.db.prepare('SELECT * FROM dedup_hashes WHERE session_id = ?').all(sessionId) as any[];
+    const rows = this.db.prepare('SELECT * FROM dedup_hashes WHERE session_id = ?').all(sessionId) as RawDedupHashRow[];
     return rows.map(row => ({
       hash: row.hash,
       sessionId: row.session_id,
@@ -305,7 +348,7 @@ export class DatabaseManager {
   }
 
   getSessionAnalyzedMessages(sessionId: string): AnalyzedMessageRow[] {
-    const rows = this.db.prepare('SELECT * FROM analyzed_messages WHERE session_id = ?').all(sessionId) as any[];
+    const rows = this.db.prepare('SELECT * FROM analyzed_messages WHERE session_id = ?').all(sessionId) as RawAnalyzedMessageRow[];
     return rows.map(row => ({
       id: row.id,
       sessionId: row.session_id,

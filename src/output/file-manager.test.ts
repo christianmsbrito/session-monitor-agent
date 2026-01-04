@@ -20,7 +20,6 @@ const mockedFs = vi.mocked(fs);
 describe('FileManager', () => {
   const outputDir = '/tmp/test-session-docs';
   const sessionId = 'abc12345-1234-5678-9abc-def012345678';
-  const shortSessionId = 'abc12345';
 
   beforeEach(() => {
     vi.clearAllMocks();

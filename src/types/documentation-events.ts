@@ -80,23 +80,6 @@ export const EVENT_TYPE_LABELS: Record<EventType, string> = {
   correction: '⚠️ Correction',
 };
 
-/**
- * Event types that represent user interaction (highest priority for documentation)
- */
-export const USER_FACING_EVENT_TYPES: EventType[] = [
-  'user_request',
-  'user_confirmed',
-  'user_provided',
-];
-
-/**
- * Event types that are unconfirmed agent conclusions
- */
-export const UNCONFIRMED_EVENT_TYPES: EventType[] = [
-  'agent_analysis',
-  'agent_suggestion',
-];
-
 export interface DocumentationEvent {
   eventType: EventType;
   title: string;

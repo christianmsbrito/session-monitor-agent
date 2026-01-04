@@ -384,7 +384,7 @@ export class FileManager {
       }
 
       return false;
-    } catch (error) {
+    } catch {
       // File operations might fail, but we don't want to crash
       return false;
     }

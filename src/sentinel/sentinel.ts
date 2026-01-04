@@ -358,7 +358,7 @@ Enter your Anthropic API key:" ¬
     return new Promise((resolve) => {
       // Escape single quotes for shell
       const escapedScript = script.replace(/'/g, "'\"'\"'");
-      exec(`osascript -e '${escapedScript}'`, (error, stdout, stderr) => {
+      exec(`osascript -e '${escapedScript}'`, (error, stdout, _stderr) => {
         if (error) {
           this.log(`AppleScript error: ${error.message}`);
           resolve('');

@@ -191,13 +191,6 @@ export async function uninstallStartup(): Promise<UninstallStartupResult> {
 }
 
 /**
- * Check if LaunchAgent is installed
- */
-export async function isStartupInstalled(): Promise<boolean> {
-  return fileExists(PLIST_PATH);
-}
-
-/**
  * Load the LaunchAgent
  */
 async function loadLaunchAgent(): Promise<boolean> {
@@ -231,16 +224,3 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
-/**
- * Get the plist path
- */
-export function getPlistPath(): string {
-  return PLIST_PATH;
-}
-
-/**
- * Get the LaunchAgent label
- */
-export function getLaunchAgentLabel(): string {
-  return LAUNCH_AGENT_LABEL;
-}

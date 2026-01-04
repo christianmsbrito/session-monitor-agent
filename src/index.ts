@@ -13,7 +13,6 @@ import {
   Sentinel,
   installStartup,
   uninstallStartup,
-  getPlistPath,
   type SentinelConfig,
   type InstallStartupOptions,
 } from './sentinel/index.js';

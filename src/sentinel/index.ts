@@ -13,9 +13,6 @@ export {
 export {
   installStartup,
   uninstallStartup,
-  isStartupInstalled,
-  getPlistPath,
-  getLaunchAgentLabel,
   type InstallStartupOptions,
   type InstallStartupResult,
   type UninstallStartupResult,

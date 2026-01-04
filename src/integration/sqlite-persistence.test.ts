@@ -11,7 +11,6 @@ import { initializeDatabase, closeDatabase, getDatabase } from '../database/inde
 import { DeduplicationTracker } from '../documentation/deduplication.js';
 import { AnalyzedMessageTracker } from '../documentation/analyzed-tracker.js';
 import { generateSessionMarkdown } from '../output/session-markdown-generator.js';
-import { SessionMarkdownDebouncer } from '../output/session-markdown-debouncer.js';
 
 describe('SQLite Persistence Integration', () => {
   let testDir: string;

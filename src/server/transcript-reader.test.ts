@@ -7,7 +7,7 @@
  * - Handling of transcript file changes
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import * as fs from 'fs';
 import { TranscriptReader } from './transcript-reader.js';
 

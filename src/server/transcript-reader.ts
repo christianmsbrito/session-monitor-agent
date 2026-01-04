@@ -68,7 +68,7 @@ export class TranscriptReader {
       }
 
       this.lastPosition.set(transcriptPath, stats.size);
-    } catch (err) {
+    } catch {
       // File might not exist yet or be inaccessible
     }
 

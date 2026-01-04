@@ -1,7 +1,5 @@
 export {
   SocketServer,
-  sendHookEvent,
-  getDefaultSocketPath,
   type HookEvent,
   type SocketServerConfig,
 } from './socket-server.js';

@@ -5,7 +5,7 @@
 import { Command } from 'commander';
 import * as path from 'path';
 import * as os from 'os';
-import { DEFAULT_CONFIG, type Config } from '../types/index.js';
+import { DEFAULT_CONFIG } from '../types/index.js';
 import type { WatcherConfig } from '../watcher/index.js';
 
 export interface WatchOptions {

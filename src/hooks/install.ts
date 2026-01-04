@@ -134,7 +134,7 @@ export async function installHooks(options: {
     // Try to make it executable
     try {
       await fs.promises.chmod(hookScriptPath, 0o755);
-    } catch (err) {
+    } catch {
       result.errors.push(`Hook script not found or not executable: ${hookScriptPath}`);
       return result;
     }

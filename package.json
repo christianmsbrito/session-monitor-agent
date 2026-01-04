@@ -11,7 +11,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src",
     "test": "vitest",
     "test:run": "vitest run"
   },
@@ -30,10 +30,12 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.2",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.1",
     "eslint": "^9.16.0",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.51.0",
     "vitest": "^2.1.8"
   },
   "engines": {
