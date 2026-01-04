@@ -3,7 +3,7 @@
  * Hook script that sends events to the session-monitor daemon
  *
  * This script is called by Claude Code hooks and forwards events
- * to the session-monitor via Unix socket.
+ * to the appropriate session-monitor based on the session's working directory.
  *
  * Usage: Called automatically by Claude Code when hooks fire
  * Input: JSON via stdin with hook data
@@ -15,13 +15,35 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-const SOCKET_PATH = process.env.SESSION_MONITOR_SOCKET ||
-  path.join(os.tmpdir(), 'session-monitor.sock');
-
+const REGISTRY_PATH = path.join(os.tmpdir(), 'session-monitor-registry.json');
 const SENTINEL_SOCKET_PATH = path.join(os.tmpdir(), 'session-monitor-sentinel.sock');
 
 const DEBUG = process.env.SESSION_MONITOR_DEBUG === '1';
 const LOG_FILE = path.join(os.tmpdir(), 'session-monitor-hooks.log');
+
+interface MonitorEntry {
+  id: string;
+  socketPath: string;
+  scopeDirectory: string;
+  outputDirectory: string;
+  pid: number;
+  startedAt: string;
+}
+
+interface Registry {
+  monitors: MonitorEntry[];
+  version: number;
+}
+
+interface HookInput {
+  hook_type?: string;
+  session_id?: string;
+  transcript_path?: string;
+  cwd?: string;  // Working directory of the Claude session
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  [key: string]: unknown;
+}
 
 function debugLog(message: string): void {
   if (DEBUG) {
@@ -31,18 +53,49 @@ function debugLog(message: string): void {
   }
 }
 
-interface HookInput {
-  hook_type?: string;
-  session_id?: string;
-  transcript_path?: string;
-  tool_name?: string;
-  tool_input?: Record<string, unknown>;
-  [key: string]: unknown;
+function readRegistry(): Registry {
+  try {
+    const content = fs.readFileSync(REGISTRY_PATH, 'utf-8');
+    return JSON.parse(content) as Registry;
+  } catch {
+    return { monitors: [], version: 1 };
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findMatchingMonitor(sessionCwd: string): MonitorEntry | null {
+  const registry = readRegistry();
+
+  // Filter to alive monitors whose scope contains the session cwd
+  const candidates = registry.monitors.filter(m => {
+    if (!isProcessAlive(m.pid)) return false;
+
+    // Normalize paths for comparison
+    const normalizedCwd = path.resolve(sessionCwd);
+    const normalizedScope = path.resolve(m.scopeDirectory);
+
+    return normalizedCwd === normalizedScope ||
+           normalizedCwd.startsWith(normalizedScope + path.sep);
+  });
+
+  if (candidates.length === 0) return null;
+
+  // Return most specific (longest scopeDirectory)
+  return candidates.sort((a, b) =>
+    b.scopeDirectory.length - a.scopeDirectory.length
+  )[0];
 }
 
 async function main(): Promise<void> {
   debugLog(`Hook script started. CLAUDE_HOOK_TYPE=${process.env.CLAUDE_HOOK_TYPE}`);
-  debugLog(`Socket path: ${SOCKET_PATH}`);
 
   // Read stdin
   let input = '';
@@ -57,15 +110,16 @@ async function main(): Promise<void> {
     hookData = JSON.parse(input);
   } catch (err) {
     debugLog(`Failed to parse JSON: ${err}`);
-    // Invalid JSON, exit silently
     process.exit(0);
   }
 
   // Determine hook type from environment or input
   const hookType = process.env.CLAUDE_HOOK_TYPE || hookData.hook_type || 'unknown';
+  const sessionCwd = hookData.cwd || process.env.CLAUDE_PROJECT_DIR || '';
 
   debugLog(`Hook type: ${hookType}`);
   debugLog(`Session ID: ${hookData.session_id}`);
+  debugLog(`Session CWD: ${sessionCwd}`);
   debugLog(`Transcript path: ${hookData.transcript_path}`);
 
   // Build event payload
@@ -73,19 +127,24 @@ async function main(): Promise<void> {
     type: hookType,
     sessionId: hookData.session_id || '',
     transcriptPath: hookData.transcript_path || '',
+    cwd: sessionCwd,
     timestamp: new Date().toISOString(),
     data: hookData,
   };
 
-  // Send to main monitor socket
-  try {
-    debugLog(`Sending event to monitor socket...`);
-    await sendToSocket(event, SOCKET_PATH);
-    debugLog(`Event sent to monitor successfully`);
-  } catch (err) {
-    debugLog(`Failed to send to monitor socket: ${err}`);
-    // Socket not available, monitor might not be running
-    // Exit silently to not block Claude Code
+  // Find the matching monitor based on session cwd
+  const monitor = sessionCwd ? findMatchingMonitor(sessionCwd) : null;
+
+  if (monitor) {
+    debugLog(`Found matching monitor: ${monitor.id} (scope: ${monitor.scopeDirectory})`);
+    try {
+      await sendToSocket(event, monitor.socketPath);
+      debugLog(`Event sent to monitor ${monitor.id} successfully`);
+    } catch (err) {
+      debugLog(`Failed to send to monitor socket: ${err}`);
+    }
+  } else {
+    debugLog(`No matching monitor found for cwd: ${sessionCwd}`);
   }
 
   // On SessionStart, also send to sentinel socket (fire-and-forget)
@@ -96,7 +155,6 @@ async function main(): Promise<void> {
       debugLog(`Event sent to sentinel successfully`);
     } catch (err) {
       debugLog(`Failed to send to sentinel socket: ${err}`);
-      // Sentinel might not be running, that's fine
     }
   }
 

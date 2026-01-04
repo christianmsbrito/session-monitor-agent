@@ -17,6 +17,7 @@ export interface WatchOptions {
   batchSize: number;
   flushInterval: number;
   socketPath?: string;
+  scope?: string;
 }
 
 export interface InstallOptions {
@@ -134,6 +135,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
       'Unix socket path',
       DEFAULT_SOCKET_PATH
     )
+    .option(
+      '--scope <dir>',
+      'Directory scope for this monitor (default: current directory)'
+    )
     .action((opts) => {
       program.setOptionValue('_parsed', {
         command: 'start',
@@ -146,6 +151,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
           batchSize: parseInt(opts.batchSize, 10),
           flushInterval: parseInt(opts.flushInterval, 10),
           socketPath: opts.socket,
+          scope: opts.scope,
         },
       });
     });
@@ -260,9 +266,17 @@ export function buildWatcherConfig(options: WatchOptions): WatcherConfig {
     ? options.output
     : path.resolve(process.cwd(), options.output);
 
+  // Resolve scope directory to absolute path (default: cwd)
+  const scopeDirectory = options.scope
+    ? (path.isAbsolute(options.scope)
+        ? options.scope
+        : path.resolve(process.cwd(), options.scope))
+    : process.cwd();
+
   return {
     socketPath: options.socketPath,
     outputDir,
+    scopeDirectory,
     maxQueueSize: options.maxQueue,
     batchSize: options.batchSize,
     flushIntervalMs: options.flushInterval,
@@ -311,6 +325,7 @@ AUTOMATIC STARTUP (macOS):
 
 OPTIONS (for 'start' command):
   -o, --output <dir>       Output directory for docs (default: .session-docs)
+  --scope <dir>            Directory scope for this monitor (default: cwd)
   -k, --api-key <key>      Anthropic API key (or set ANTHROPIC_API_KEY)
   -m, --model <model>      Model for doc agent (default: claude-3-haiku-20240307)
   -v, --verbose            Enable verbose logging

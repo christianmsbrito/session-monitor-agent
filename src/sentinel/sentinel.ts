@@ -1,6 +1,6 @@
 /**
  * Sentinel - Lightweight daemon that alerts when Claude Code sessions start
- * without the main session-monitor running.
+ * without a matching session-monitor covering that directory.
  *
  * Runs at system startup via LaunchAgent and monitors for SessionStart events.
  */
@@ -11,10 +11,10 @@ import * as path from 'path';
 import * as os from 'os';
 import { exec, spawn } from 'child_process';
 import { EventEmitter } from 'events';
+import { RegistryManager } from '../registry/index.js';
 
-// Socket paths
+// Socket path for sentinel
 const SENTINEL_SOCKET_PATH = path.join(os.tmpdir(), 'session-monitor-sentinel.sock');
-const MONITOR_SOCKET_PATH = path.join(os.tmpdir(), 'session-monitor.sock');
 
 export interface SentinelConfig {
   autoStart?: boolean;
@@ -25,6 +25,7 @@ export interface HookEvent {
   type: string;
   sessionId: string;
   transcriptPath: string;
+  cwd?: string;
   timestamp: string;
   data?: Record<string, unknown>;
 }
@@ -135,67 +136,45 @@ export class Sentinel extends EventEmitter {
       return;
     }
 
+    const sessionCwd = event.cwd || '';
     this.log(`SessionStart detected for session: ${event.sessionId}`);
+    this.log(`Session working directory: ${sessionCwd}`);
 
-    // Check if the main monitor is running
-    const monitorRunning = await this.isMonitorRunning();
+    // Check if the session is covered by any monitor
+    const isCovered = sessionCwd ? RegistryManager.isCovered(sessionCwd) : false;
 
-    if (monitorRunning) {
-      this.log('Monitor is running, no action needed');
+    if (isCovered) {
+      const monitor = RegistryManager.findMatchingMonitor(sessionCwd);
+      this.log(`Session is covered by monitor: ${monitor?.id} (scope: ${monitor?.scopeDirectory})`);
       return;
     }
 
-    this.log('Monitor is NOT running');
+    this.log(`Session is NOT covered by any monitor`);
 
     if (this.autoStart) {
-      await this.autoStartMonitor();
+      await this.autoStartMonitor(sessionCwd);
     } else {
-      await this.showNotification();
+      await this.showNotification(sessionCwd);
     }
-  }
-
-  /**
-   * Check if the main session-monitor is running
-   */
-  private async isMonitorRunning(): Promise<boolean> {
-    // First check if socket file exists
-    try {
-      await fs.promises.access(MONITOR_SOCKET_PATH);
-    } catch {
-      return false;
-    }
-
-    // Try to connect to verify it's actually listening
-    return new Promise((resolve) => {
-      const client = net.createConnection(MONITOR_SOCKET_PATH, () => {
-        client.destroy();
-        resolve(true);
-      });
-
-      client.on('error', () => {
-        resolve(false);
-      });
-
-      // Quick timeout
-      setTimeout(() => {
-        client.destroy();
-        resolve(false);
-      }, 100);
-    });
   }
 
   /**
    * Show macOS notification with action button and configuration options
    */
-  private async showNotification(): Promise<void> {
+  private async showNotification(sessionCwd: string): Promise<void> {
     this.log('Showing notification dialog...');
+
+    const displayCwd = sessionCwd || '(unknown)';
 
     // First dialog: Ask what to do
     const mainScript = `
-      set dialogResult to display dialog "Session monitor is not running. Start it now?" ¬
+      set dialogResult to display dialog "Claude Code session started in:
+${displayCwd}
+
+No session monitor is covering this directory." ¬
         buttons {"Ignore", "Configure...", "Start (Default)"} ¬
         default button "Start (Default)" ¬
-        with title "Claude Code Session Started" ¬
+        with title "Session Monitor" ¬
         with icon caution
 
       return button returned of dialogResult
@@ -210,24 +189,31 @@ export class Sentinel extends EventEmitter {
 
     if (mainResult === 'Start (Default)') {
       this.log('User clicked Start (Default)');
-      this.startMonitorInTerminal('.session-docs', false);
+      // Start with scope = session cwd, output = .session-docs in that directory
+      const outputPath = sessionCwd ? `${sessionCwd}/.session-docs` : '.session-docs';
+      this.startMonitorInTerminal(outputPath, false, undefined, sessionCwd);
       return;
     }
 
     // User clicked "Configure..." - show configuration dialogs
     this.log('User clicked Configure...');
-    const config = await this.showConfigurationDialogs();
+    const config = await this.showConfigurationDialogs(sessionCwd);
 
     if (config) {
-      this.startMonitorInTerminal(config.outputPath, config.verbose, config.apiKey);
+      this.startMonitorInTerminal(config.outputPath, config.verbose, config.apiKey, config.scopePath);
     }
   }
 
   /**
-   * Show configuration dialogs for output path, verbose mode, and API key if needed
+   * Show configuration dialogs for scope, output path, verbose mode, and API key if needed
    */
-  private async showConfigurationDialogs(): Promise<{ outputPath: string; verbose: boolean; apiKey?: string } | null> {
-    const defaultPath = '.session-docs';
+  private async showConfigurationDialogs(sessionCwd: string): Promise<{
+    scopePath: string;
+    outputPath: string;
+    verbose: boolean;
+    apiKey?: string;
+  } | null> {
+    const defaultScope = sessionCwd || process.cwd();
     const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
 
     // If no API key in environment, ask for it first
@@ -277,9 +263,55 @@ Enter your Anthropic API key:" ¬
       }
     }
 
-    // Dialog for output path with text field
+    // Dialog for scope directory
+    const scopeScript = `
+      set defaultScope to "${defaultScope}"
+      set dialogResult to display dialog "Monitor scope directory (sessions in this directory and subdirectories will be captured):" ¬
+        default answer defaultScope ¬
+        buttons {"Cancel", "Browse...", "Next"} ¬
+        default button "Next" ¬
+        with title "Configure Session Monitor" ¬
+        with icon note
+
+      set buttonPressed to button returned of dialogResult
+      set textEntered to text returned of dialogResult
+
+      if buttonPressed is "Cancel" then
+        return "CANCEL"
+      else if buttonPressed is "Browse..." then
+        return "BROWSE:" & textEntered
+      else
+        return "PATH:" & textEntered
+      end if
+    `;
+
+    let scopePath = defaultScope;
+    const scopeResult = await this.runAppleScript(scopeScript);
+
+    if (scopeResult === 'CANCEL') {
+      this.log('User cancelled configuration');
+      return null;
+    }
+
+    if (scopeResult.startsWith('BROWSE:')) {
+      const browseScript = `
+        set chosenFolder to choose folder with prompt "Select scope directory:" ¬
+          default location (path to home folder)
+        return POSIX path of chosenFolder
+      `;
+
+      const browsedPath = await this.runAppleScript(browseScript);
+      if (browsedPath && !browsedPath.includes('User canceled')) {
+        scopePath = browsedPath.trim().replace(/\/$/, ''); // Remove trailing slash
+      }
+    } else if (scopeResult.startsWith('PATH:')) {
+      scopePath = scopeResult.substring(5) || defaultScope;
+    }
+
+    // Dialog for output path
+    const defaultOutput = `${scopePath}/.session-docs`;
     const pathScript = `
-      set defaultPath to "${defaultPath}"
+      set defaultPath to "${defaultOutput}"
       set dialogResult to display dialog "Output directory for documentation:" ¬
         default answer defaultPath ¬
         buttons {"Cancel", "Browse...", "Next"} ¬
@@ -299,7 +331,7 @@ Enter your Anthropic API key:" ¬
       end if
     `;
 
-    let outputPath = defaultPath;
+    let outputPath = defaultOutput;
     const pathResult = await this.runAppleScript(pathScript);
 
     if (pathResult === 'CANCEL') {
@@ -308,8 +340,6 @@ Enter your Anthropic API key:" ¬
     }
 
     if (pathResult.startsWith('BROWSE:')) {
-      // User wants to browse for folder
-      const currentPath = pathResult.substring(7);
       const browseScript = `
         set chosenFolder to choose folder with prompt "Select output directory for documentation:" ¬
           default location (path to home folder)
@@ -318,16 +348,15 @@ Enter your Anthropic API key:" ¬
 
       const browsedPath = await this.runAppleScript(browseScript);
       if (browsedPath && !browsedPath.includes('User canceled')) {
-        outputPath = browsedPath.trim();
+        outputPath = browsedPath.trim().replace(/\/$/, '');
       } else {
-        // User cancelled browse, use the text they entered
-        outputPath = currentPath || defaultPath;
+        outputPath = pathResult.substring(7) || defaultOutput;
       }
     } else if (pathResult.startsWith('PATH:')) {
-      outputPath = pathResult.substring(5) || defaultPath;
+      outputPath = pathResult.substring(5) || defaultOutput;
     }
 
-    // Dialog for verbose mode (checkbox simulation using buttons)
+    // Dialog for verbose mode
     const verboseScript = `
       set dialogResult to display dialog "Enable verbose logging?" ¬
         buttons {"Cancel", "No", "Yes"} ¬
@@ -347,8 +376,8 @@ Enter your Anthropic API key:" ¬
 
     const verbose = verboseResult === 'Yes';
 
-    this.log(`Configuration: outputPath="${outputPath}", verbose=${verbose}, apiKey=${apiKey ? '[provided]' : '[from env]'}`);
-    return { outputPath, verbose, apiKey };
+    this.log(`Configuration: scope="${scopePath}", output="${outputPath}", verbose=${verbose}, apiKey=${apiKey ? '[provided]' : '[from env]'}`);
+    return { scopePath, outputPath, verbose, apiKey };
   }
 
   /**
@@ -372,21 +401,26 @@ Enter your Anthropic API key:" ¬
   /**
    * Start the monitor in a new Terminal window with options
    */
-  private startMonitorInTerminal(outputPath: string, verbose: boolean, apiKey?: string): void {
+  private startMonitorInTerminal(outputPath: string, verbose: boolean, apiKey?: string, scopePath?: string): void {
     // Build the command with options
     let command = '';
 
     // If API key is provided, set it as an environment variable for the command
     if (apiKey) {
-      // Escape the API key for shell
       const escapedKey = apiKey.replace(/'/g, "'\\''");
       command += `ANTHROPIC_API_KEY='${escapedKey}' `;
     }
 
     command += 'session-monitor start';
 
-    if (outputPath && outputPath !== '.session-docs') {
-      // Escape the path for shell
+    // Add scope if provided
+    if (scopePath) {
+      const escapedScope = scopePath.replace(/"/g, '\\"');
+      command += ` --scope "${escapedScope}"`;
+    }
+
+    // Add output path
+    if (outputPath) {
       const escapedPath = outputPath.replace(/"/g, '\\"');
       command += ` -o "${escapedPath}"`;
     }
@@ -395,7 +429,7 @@ Enter your Anthropic API key:" ¬
       command += ' -v';
     }
 
-    this.log(`Starting monitor with command: ${apiKey ? '[API_KEY] ' : ''}session-monitor start${outputPath !== '.session-docs' ? ` -o "${outputPath}"` : ''}${verbose ? ' -v' : ''}`);
+    this.log(`Starting monitor with command: ${apiKey ? '[API_KEY] ' : ''}session-monitor start${scopePath ? ` --scope "${scopePath}"` : ''}${outputPath ? ` -o "${outputPath}"` : ''}${verbose ? ' -v' : ''}`);
 
     const script = `
       tell application "Terminal"
@@ -416,26 +450,32 @@ Enter your Anthropic API key:" ¬
   /**
    * Auto-start the monitor in the background
    */
-  private async autoStartMonitor(): Promise<void> {
+  private async autoStartMonitor(sessionCwd: string): Promise<void> {
     this.log('Auto-starting session monitor...');
 
     // Find the session-monitor executable
     const monitorPath = await this.findSessionMonitor();
     if (!monitorPath) {
       this.log('Could not find session-monitor executable');
-      // Fall back to showing notification
-      await this.showNotification();
+      await this.showNotification(sessionCwd);
       return;
     }
 
+    // Build args
+    const args = [monitorPath, 'start'];
+    if (sessionCwd) {
+      args.push('--scope', sessionCwd);
+      args.push('-o', `${sessionCwd}/.session-docs`);
+    }
+
     // Spawn detached process
-    const child = spawn('node', [monitorPath, 'start'], {
+    const child = spawn('node', args, {
       detached: true,
       stdio: 'ignore',
     });
 
     child.unref();
-    this.log(`Auto-started monitor (PID: ${child.pid})`);
+    this.log(`Auto-started monitor (PID: ${child.pid}) with scope: ${sessionCwd || 'default'}`);
   }
 
   /**
@@ -492,11 +532,4 @@ Enter your Anthropic API key:" ¬
  */
 export function getSentinelSocketPath(): string {
   return SENTINEL_SOCKET_PATH;
-}
-
-/**
- * Get the monitor socket path
- */
-export function getMonitorSocketPath(): string {
-  return MONITOR_SOCKET_PATH;
 }

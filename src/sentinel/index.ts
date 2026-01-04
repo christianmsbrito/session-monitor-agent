@@ -5,7 +5,6 @@
 export {
   Sentinel,
   getSentinelSocketPath,
-  getMonitorSocketPath,
   type SentinelConfig,
   type HookEvent,
 } from './sentinel.js';

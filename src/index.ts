@@ -16,6 +16,7 @@ import {
   type SentinelConfig,
   type InstallStartupOptions,
 } from './sentinel/index.js';
+import { RegistryManager } from './registry/index.js';
 
 async function main(): Promise<void> {
   const parsed = parseArgs(process.argv);
@@ -129,33 +130,55 @@ async function handleUninstall(options: { verbose: boolean }): Promise<void> {
 }
 
 async function handleStatus(): Promise<void> {
-  const result = await checkHooksInstalled();
+  const hookResult = await checkHooksInstalled();
 
-  console.log('Session Monitor Hook Status\n');
+  console.log('Session Monitor Status\n');
+  console.log('======================\n');
 
-  if (result.installed.length > 0) {
-    console.log('Installed:');
-    for (const hook of result.installed) {
+  // Hooks status
+  console.log('Hooks:');
+  if (hookResult.installed.length > 0) {
+    for (const hook of hookResult.installed) {
       console.log(`  ✓ ${hook}`);
     }
   }
-
-  if (result.missing.length > 0) {
-    console.log('\nNot installed:');
-    for (const hook of result.missing) {
+  if (hookResult.missing.length > 0) {
+    for (const hook of hookResult.missing) {
       console.log(`  ✗ ${hook}`);
     }
   }
 
-  if (result.missing.length === 0) {
-    console.log('\nAll hooks are installed. Ready to use!');
-    console.log('Run: session-monitor start');
-  } else if (result.installed.length === 0) {
-    console.log('\nNo hooks installed.');
-    console.log('Run: session-monitor install');
+  // Monitor status
+  console.log('\nActive Monitors:');
+  const monitors = RegistryManager.getActiveMonitors();
+
+  if (monitors.length === 0) {
+    console.log('  (none)');
   } else {
-    console.log('\nSome hooks are missing.');
-    console.log('Run: session-monitor install --force');
+    console.log('  ID        Scope                                    Output                         PID');
+    console.log('  ' + '-'.repeat(90));
+    for (const monitor of monitors) {
+      const id = monitor.id.padEnd(10);
+      const scope = monitor.scopeDirectory.slice(0, 40).padEnd(40);
+      const output = monitor.outputDirectory.slice(0, 30).padEnd(30);
+      console.log(`  ${id}${scope}${output}${monitor.pid}`);
+    }
+  }
+
+  // Summary
+  console.log('');
+  if (hookResult.missing.length === 0) {
+    console.log('Hooks: All installed ✓');
+  } else if (hookResult.installed.length === 0) {
+    console.log('Hooks: Not installed. Run: session-monitor install');
+  } else {
+    console.log('Hooks: Partially installed. Run: session-monitor install --force');
+  }
+
+  if (monitors.length > 0) {
+    console.log(`Monitors: ${monitors.length} running`);
+  } else {
+    console.log('Monitors: None running. Run: session-monitor start');
   }
 }
 

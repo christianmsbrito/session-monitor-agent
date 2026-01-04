@@ -12,10 +12,13 @@ import { TranscriptReader } from '../server/transcript-reader.js';
 import { MessageRouter } from '../interceptor/index.js';
 import { DocumentationAgent } from '../documentation/index.js';
 import { initializeDatabase, closeDatabase, type DatabaseManager } from '../database/index.js';
+import { RegistryManager, type MonitorEntry } from '../registry/index.js';
 
 export interface WatcherConfig extends Config {
   /** Custom socket path (optional) */
   socketPath?: string;
+  /** Directory scope for this monitor */
+  scopeDirectory?: string;
 }
 
 /**
@@ -50,6 +53,8 @@ export class SessionWatcher {
   /** Map of sessionId -> SessionState for all active sessions */
   private sessions: Map<string, SessionState> = new Map();
   private monitorSessionId: string;
+  private monitorId: string;
+  private scopeDirectory: string;
   private verbose: boolean;
   private messageCount: number = 0;
   private hookCount: number = 0;
@@ -57,11 +62,14 @@ export class SessionWatcher {
 
   constructor(private config: WatcherConfig) {
     this.monitorSessionId = this.generateSessionId();
+    this.monitorId = RegistryManager.generateId();
+    this.scopeDirectory = config.scopeDirectory || process.cwd();
     this.verbose = config.verbose;
 
-    // Initialize components
+    // Initialize components with unique socket path
+    const socketPath = config.socketPath || RegistryManager.getSocketPath(this.monitorId);
     this.socketServer = new SocketServer({
-      socketPath: config.socketPath,
+      socketPath,
     });
 
     this.transcriptReader = new TranscriptReader();
@@ -403,12 +411,24 @@ export class SessionWatcher {
       // Continue without DB - doc agents will use file-based persistence
     }
 
+    // Register in the monitor registry
+    const entry: MonitorEntry = {
+      id: this.monitorId,
+      socketPath: this.socketServer.getSocketPath(),
+      scopeDirectory: this.scopeDirectory,
+      outputDirectory: this.config.outputDir,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    };
+    await RegistryManager.register(entry);
+
     console.error(`[session-monitor] Starting hook-based session monitor`);
-    console.error(`[session-monitor] Monitor ID: ${this.monitorSessionId}`);
+    console.error(`[session-monitor] Monitor ID: ${this.monitorId}`);
+    console.error(`[session-monitor] Scope: ${this.scopeDirectory}`);
     console.error(`[session-monitor] Output: ${this.config.outputDir}`);
     console.error(`[session-monitor] Socket: ${this.socketServer.getSocketPath()}`);
     console.error(`[session-monitor] Waiting for Claude Code hooks...`);
-    console.error(`[session-monitor] Each Claude Code session will get its own documentation folder`);
+    console.error(`[session-monitor] Monitoring sessions in ${this.scopeDirectory} and subdirectories`);
     console.error(`[session-monitor] Press Ctrl+C to stop\n`);
 
     await this.socketServer.start();
@@ -423,6 +443,9 @@ export class SessionWatcher {
    */
   async shutdown(): Promise<void> {
     console.error('\n[session-monitor] Shutting down...');
+
+    // Unregister from registry first
+    await RegistryManager.unregister(this.monitorId);
 
     // Stop accepting new connections
     await this.socketServer.stop();
@@ -532,5 +555,19 @@ export class SessionWatcher {
       activeSessions: this.getActiveSessionCount(),
       sessions: sessionStats,
     };
+  }
+
+  /**
+   * Get monitor ID
+   */
+  getMonitorId(): string {
+    return this.monitorId;
+  }
+
+  /**
+   * Get scope directory
+   */
+  getScopeDirectory(): string {
+    return this.scopeDirectory;
   }
 }
