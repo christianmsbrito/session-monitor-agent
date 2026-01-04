@@ -100,22 +100,25 @@ session-monitor start [options]
 | `-k, --api-key <key>` | Anthropic API key | `$ANTHROPIC_API_KEY` |
 | `-m, --model <model>` | Model for analysis | `claude-3-haiku-20240307` |
 | `-v, --verbose` | Verbose logging | `false` |
+| `-d, --debug` | Debug logging in hooks (writes to `/tmp/`) | `false` |
+| `--socket <path>` | Unix socket path | `/tmp/session-monitor.sock` |
 | `--max-queue <n>` | Max queue size | `1000` |
 | `--batch-size <n>` | Messages per batch | `10` |
+| `--flush-interval <ms>` | Flush interval in ms | `5000` |
 
 ---
 
 ## Output Structure
 
-Documentation is organized by date and session:
+Documentation is organized by date and session, with SQLite persistence:
 
 ```
 .session-docs/
-├── index.md                              # Links to all sessions
+├── sessions.db                           # SQLite database (all sessions & events)
 └── sessions/
     └── 2025-12-24/
         └── abc123-debugging-auth/
-            ├── session.md                # Session overview
+            ├── session.md                # Session overview (generated from DB)
             ├── events/
             │   ├── 001-user_request.md
             │   ├── 002-agent_analysis.md
@@ -124,6 +127,11 @@ Documentation is organized by date and session:
                 └── running-summary.md
 ```
 
+The SQLite database stores all session data, enabling features like:
+- Resume documentation after monitor restart
+- Regenerate markdown from database
+- Query sessions and events programmatically
+
 ---
 
 ## What Gets Documented
@@ -131,6 +139,7 @@ Documentation is organized by date and session:
 ### Confirmed Events (User Verified)
 - `user_request` - What you asked for
 - `user_confirmed` - Explicit confirmations
+- `user_provided` - Information/context the user directly provided
 - `solution_verified` - Fixes confirmed working
 - `requirement_clarified` - Clarified requirements
 
@@ -257,13 +266,19 @@ npm test           # Test
 ## Architecture
 
 ```
-Claude Code → Hooks → Unix Socket → Session Watcher → Doc Agent → Markdown
+Claude Code → Hooks → Unix Socket → Session Watcher → Transcript Reader → Message Router
+    → Significance Detector → Doc Agent → Deduplication → Database → Markdown
 ```
 
-- **Hook Script**: Triggered by Claude Code, sends events via socket
-- **Session Watcher**: Orchestrates the documentation pipeline
-- **Documentation Agent**: Uses Claude Haiku to analyze and document
-- **File Manager**: Writes organized markdown documentation
+- **Hook Script**: Triggered by Claude Code hooks (PostToolUse, Stop, SessionStart, SessionEnd), sends events via Unix socket
+- **Session Watcher**: Orchestrates the documentation pipeline, manages one DocumentationAgent per session
+- **Transcript Reader**: Parses Claude Code's JSONL transcript files into structured messages
+- **Message Router**: Batches messages with queue management and backpressure control
+- **Significance Detector**: Pre-filters messages for potential documentation significance (user requests, decisions, discoveries, bug fixes)
+- **Documentation Agent**: Uses Claude Haiku to analyze significant content and generate documentation events
+- **Deduplication Tracker**: Prevents duplicate events using evidence-based hashing and fuzzy similarity matching
+- **Database Manager**: SQLite persistence for sessions, events, deduplication hashes, and analyzed messages
+- **File Manager**: Writes organized markdown documentation to `.session-docs/`
 
 ---
 

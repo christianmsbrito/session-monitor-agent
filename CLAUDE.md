@@ -39,28 +39,50 @@ Claude Code Session
         ↓
    SocketServer (src/server/socket-server.ts) → receives hook events
         ↓
-   SessionWatcher (src/watcher/session-watcher.ts) → reads transcript file
+   SessionWatcher (src/watcher/session-watcher.ts) → orchestrates pipeline
         ↓
    TranscriptReader (src/server/transcript-reader.ts) → parses JSONL entries
         ↓
    MessageRouter (src/interceptor/message-router.ts) → batches messages with backpressure
         ↓
+   SignificanceDetector (src/documentation/significance-detector.ts) → pre-filters for important content
+        ↓
+   HierarchicalContextManager (src/context/hierarchical-context.ts) → manages context tiers
+        ↓
    DocumentationAgent (src/documentation/doc-agent.ts) → Claude Haiku analyzes for significance
         ↓
-   FileManager (src/output/file-manager.ts) → writes markdown documentation
+   DeduplicationTracker (src/documentation/deduplication.ts) → prevents duplicate events
+        ↓
+   AnalyzedMessageTracker (src/documentation/analyzed-tracker.ts) → cross-batch memory
+        ↓
+   DatabaseManager (src/database/db-manager.ts) → SQLite persistence
+        ↓
+   FileManager (src/output/file-manager.ts) → directory structure
+        ↓
+   SessionMarkdownGenerator (src/output/session-markdown-generator.ts) → generates session.md from DB
 ```
 
 ### Key Components
 
-- **SessionWatcher**: Main orchestrator - listens on Unix socket for hook notifications, coordinates the documentation pipeline. Creates one DocumentationAgent per Claude Code session.
+- **SessionWatcher**: Main orchestrator - listens on Unix socket for hook notifications, coordinates the documentation pipeline. Creates one DocumentationAgent per Claude Code session. Initializes SQLite database for persistence.
 
-- **DocumentationAgent**: Uses Claude Haiku to analyze conversation batches, detect significant events (user requests, bug fixes, decisions), and generate documentation. Tracks confirmed vs unconfirmed findings.
+- **DocumentationAgent**: Uses Claude Haiku to analyze conversation batches, detect significant events (user requests, bug fixes, decisions), and generate documentation. Tracks confirmed vs unconfirmed findings. Restores state from database on restart.
+
+- **SignificanceDetector**: Pre-filters messages for potential documentation significance. Detects patterns for user requests, confirmations, model conclusions, bug-related content, decisions, discoveries, and requirement clarifications.
+
+- **DeduplicationTracker**: Prevents duplicate documentation events using evidence-based content hashing and fuzzy similarity matching. Also tracks invalidated events (corrections, contradictions). Persists hashes to database.
+
+- **AnalyzedMessageTracker**: Prevents re-analysis of messages across batches. Maintains brief summaries of analyzed messages for cross-batch pattern detection. Persists to database.
 
 - **HierarchicalContextManager**: Three-tier context management (recent/hourly/session) to handle long sessions without exceeding context limits. Preserves full user prompts and summarizes older content.
 
 - **MessageRouter**: Queue with backpressure control. Batches messages before sending to the doc agent, filters out internal thinking content.
 
+- **DatabaseManager**: SQLite persistence layer with WAL mode. Stores sessions, events, deduplication hashes, and analyzed messages. Supports resume after restart.
+
 - **FileManager**: Manages the `.session-docs/` output structure organized by date and session subject.
+
+- **SessionMarkdownGenerator**: Regenerates `session.md` files from database state. Debounced to avoid excessive writes during rapid event creation.
 
 ### CLI Commands
 
@@ -133,16 +155,36 @@ session-monitor uninstall-startup
 
 ```
 .session-docs/
-├── index.md
+├── sessions.db                              # SQLite database
 └── sessions/
     └── YYYY-MM-DD/
-        └── {sessionId}-{subject-slug}/
-            ├── session.md
+        └── {shortSessionId}-{subject-slug}/
+            ├── session.md                   # Generated from database
             ├── events/
             │   └── 001-user_request.md
             └── summaries/
                 └── running-summary.md
 ```
+
+### Database Schema
+
+SQLite database (`sessions.db`) with 4 tables:
+
+**sessions**: Session metadata and state
+- `id`, `short_id`, `subject`, `started_at`, `ended_at`
+- `transcript_path`, `transcript_position`, `status`
+
+**events**: Documentation events with full metadata
+- `session_id`, `event_type`, `title`, `description`
+- `confidence`, `evidence`, `context`, `reasoning`
+- `related_files` (JSON), `tags` (JSON)
+- `invalidated_at`, `invalidation_reason`
+
+**dedup_hashes**: Deduplication tracking
+- `hash`, `session_id`, `event_id`, `created_at`
+
+**analyzed_messages**: Cross-batch message tracking
+- `id`, `session_id`, `brief_summary`, `analyzed_at`
 
 ### Event Types
 
@@ -155,3 +197,10 @@ Documentation events are categorized as:
 
 - Node.js >= 20.0.0
 - `ANTHROPIC_API_KEY` environment variable for the documentation agent
+
+## Key Dependencies
+
+- `@anthropic-ai/sdk` - Official Anthropic API client
+- `better-sqlite3` - Synchronous SQLite for Node.js (WAL mode)
+- `commander` - CLI argument parsing
+- `zod` - Runtime schema validation
